@@ -316,6 +316,75 @@ signal).
   `TestWarnStaleChildAliveGroupWarnsWithoutKilling` (an alive group is warned
   about but **never killed**) in `cmd/marquee/pidfile_test.go`.
 
+## Injected-page CSP relaxation
+
+**What it is.** When — and only when — marquee successfully splices the bar
+into a response, it rewrites that response's enforcing `Content-Security-Policy`
+just enough for the bar's own same-origin resources to load. This is a
+deliberate, minimal relaxation of the proxied app's *own* CSP, required because
+the bar is a real external module script (`/__marquee/bar.js`) plus a
+same-origin fetch (`/__marquee/status`): a page CSP whose `script-src` omits
+`'self'` blocks the script, so the custom element never defines and the bar
+never appears, even though everything else (proxy, injection, endpoints)
+works. It is on by default and opt-out via `--keep-csp`.
+
+**Exactly what it changes.** `relaxCSPForBar` ensures `'self'` in two
+directives and nothing else:
+
+- **Scripts.** Whichever directive governs `<script>` *elements* gains
+  `'self'`: `script-src-elem` if present (it overrides `script-src` for
+  elements), else `script-src`, else — if only `default-src` exists — a **new**
+  explicit `script-src` is added as a copy of `default-src`'s sources plus
+  `'self'` (so `default-src` itself is left intact and no other resource type
+  is broadened). If no script-governing directive exists, nothing is added.
+- **Connect.** `connect-src` gains `'self'`; else, if only `default-src`
+  exists, a new explicit `connect-src` is derived from it the same way.
+- **`'self'` is added idempotently** — a directive that already allows `'self'`
+  is untouched. The one rewrite of an existing source is the special case where
+  a governing directive is exactly `'none'`: since `'none'` cannot legally be
+  mixed with sources, it is replaced by `'self'` (the minimal way to permit our
+  resource). No other existing source is ever removed.
+
+**What it does NOT change.** Report-only CSP
+(`Content-Security-Policy-Report-Only`) is left completely untouched — it never
+blocks. No directive other than the script- and connect-governing ones is
+modified; `img-src`, `style-src`, `default-src`, etc. are preserved verbatim,
+as is directive order. Only same-origin `'self'` is ever granted — never a
+third-party host. A response marquee did **not** inject into (non-HTML, non-2xx,
+event-stream, over-cap, iframe, a bypass-switched request, or any fail-open
+pass-through) keeps its CSP byte-for-byte: the rewrite is coupled to an actual
+successful splice, at the same point the spliced body is committed.
+
+**Tradeoff and scope.** marquee is weakening a security header the app set,
+which is only acceptable because marquee is a loopback-only dev tool that
+already terminates all the app's traffic and injects script into every page —
+the CSP relaxation grants strictly less than the injection itself already
+assumes. The change is minimal (two directives, `'self'` only), fail-open (a
+malformed or surprising CSP is left verbatim; a panic in the rewrite cannot
+escape — `relaxCSPForBar` recovers and the caller in `inject` is panic-guarded
+too), and reversible per run with `--keep-csp`, which leaves every response's
+CSP exactly as the app sent it (the bar may then not load if the app's CSP
+forbids same-origin scripts).
+
+- Code: `relaxCSPForBar`, `relaxCSPValue`, `ensureScriptSelf`,
+  `ensureConnectSelf`, `ensureSelf` in `internal/proxy/csp.go`; the gated
+  call on the successful-splice path and the `relaxCSP` flag in
+  `internal/proxy/inject.go`; `Config.RelaxCSP` in `internal/proxy/proxy.go`;
+  the `--keep-csp` opt-out in `cmd/marquee/options.go`, plumbed as
+  `RelaxCSP: !opts.keepCSP` in `cmd/marquee/{main.go,attach.go}`.
+- Proven by: `TestRelaxCSPValue` (the full rewrite table: script-src /
+  script-src-elem / default-src fallbacks, connect-src, idempotency, the
+  `'none'` → `'self'` special case, no-op when no governing directive,
+  case-insensitive names, deterministic reserialization),
+  `TestRelaxCSPForBarNoHeaderNoChange`,
+  `TestRelaxCSPForBarLeavesReportOnlyUntouched`,
+  `TestRelaxCSPForBarRewritesAllEnforcingHeaders`,
+  `TestRelaxCSPForBarGarbageValueLeftUnchanged`,
+  `TestInjectRelaxesCSPWhenBarInjected`,
+  `TestInjectLeavesCSPUnchangedWhenRelaxDisabled`,
+  `TestInjectLeavesCSPUntouchedOnNonInjectedResponse` in
+  `internal/proxy/csp_test.go`.
+
 ## Standing rules
 
 Enforced via AGENTS.md, applied to every PR:

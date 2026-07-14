@@ -29,6 +29,14 @@ type Config struct {
 	// probe. When nil, the upstream falls back to 127.0.0.1:InternalPort
 	// (wrapper mode).
 	UpstreamURL *url.URL
+	// RelaxCSP, when true, makes marquee rewrite the Content-Security-Policy
+	// of responses it injects the bar into so the bar's same-origin
+	// resources are permitted: 'self' is ensured in the script-governing
+	// directive (for /__marquee/bar.js) and in connect-src (for the
+	// /__marquee/status fetch). Nothing else is changed, report-only CSP is
+	// left alone, and only successfully-injected responses are touched. See
+	// relaxCSPForBar and docs/security.md.
+	RelaxCSP bool
 	// AllowHosts are extra Host values accepted on /__marquee/* in
 	// addition to the built-in loopback allowlist. A plain entry is an
 	// exact match (port ignored); a "*.example.test" wildcard matches any
@@ -96,7 +104,7 @@ func New(cfg Config) *Handler {
 			r.Out.Header.Del("X-Marquee")
 		},
 		FlushInterval:  -1,
-		ModifyResponse: newInjector(logger, switches).modifyResponse,
+		ModifyResponse: newInjector(logger, switches, cfg.RelaxCSP).modifyResponse,
 		ErrorLog:       logger,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			logger.Printf("marquee: upstream error for %s %s: %v", r.Method, r.URL.Path, err)

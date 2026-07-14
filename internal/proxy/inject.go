@@ -29,13 +29,14 @@ const injectSizeCap = 10 << 20
 type injector struct {
 	logger   *log.Logger
 	switches *barSwitches
+	relaxCSP bool
 
 	mu      sync.Mutex
 	lastMsg string
 }
 
-func newInjector(logger *log.Logger, switches *barSwitches) *injector {
-	return &injector{logger: logger, switches: switches}
+func newInjector(logger *log.Logger, switches *barSwitches, relaxCSP bool) *injector {
+	return &injector{logger: logger, switches: switches, relaxCSP: relaxCSP}
 }
 
 // modifyResponse is the ReverseProxy.ModifyResponse hook. It always returns
@@ -155,6 +156,13 @@ func (in *injector) inject(resp *http.Response) {
 	resp.Body = readCloser{bytes.NewReader(spliced), upstream}
 	resp.ContentLength = int64(len(spliced))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(spliced)))
+
+	// Only now that the bar is actually committed do we relax the page's
+	// CSP, and only for our own same-origin resources. A pass-through
+	// response keeps its CSP verbatim.
+	if in.relaxCSP {
+		relaxCSPForBar(resp.Header)
+	}
 }
 
 // readCapped reads r until EOF or one byte past limit. complete reports

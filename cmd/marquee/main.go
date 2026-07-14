@@ -30,6 +30,9 @@ var (
 const stopTimeout = 10 * time.Second
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "attach" {
+		os.Exit(runAttach(os.Args[2:]))
+	}
 	os.Exit(run())
 }
 

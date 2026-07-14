@@ -81,8 +81,13 @@ func run() int {
 
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "marquee: could not listen on %s: %v\n", *listen, err)
+		fmt.Fprintln(os.Stderr, listenErrorMessage(*listen, err))
 		return 1
+	}
+
+	pidPath, pidPathErr := pidfilePath(*listen)
+	if pidPathErr == nil {
+		warnStaleChild(pidPath, os.Stderr)
 	}
 
 	child := runner.New(command, []string{
@@ -94,6 +99,13 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "marquee: could not start child: %v\n", err)
 		_ = ln.Close()
 		return 1
+	}
+	if pgid := child.PGID(); pidPathErr == nil && pgid > 0 {
+		if err := writePidfile(pidPath, pgid); err != nil {
+			fmt.Fprintf(os.Stderr, "marquee: could not write pidfile %s: %v\n", pidPath, err)
+		} else {
+			defer removePidfile(pidPath)
+		}
 	}
 
 	git := gitinfo.Start(workdir, 2*time.Second, nil)

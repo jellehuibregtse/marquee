@@ -73,6 +73,7 @@ func collect(dir string) (Snapshot, error) {
 func runGit(dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
+	// #nosec G204 -- args are fixed git subcommands chosen internally, never derived from HTTP or user input.
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer

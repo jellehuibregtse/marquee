@@ -120,7 +120,7 @@ func run() int {
 		ChildState: func() string { return string(child.Status().State) },
 	})
 
-	srv := &http.Server{Handler: handler}
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 

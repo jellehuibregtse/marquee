@@ -20,4 +20,15 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: go test ./e2e/ -count=1 -v
+      - name: govulncheck
+        # govulncheck v1.6.0 needs Go >= 1.25 to build, and with no third-party deps
+        # the only vulnerabilities it can find are in the build toolchain's stdlib, so
+        # pin a current patched Go here. The module floor stays 1.22 (build/test above).
+        env:
+          GOTOOLCHAIN: go1.26.5
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          govulncheck ./...
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.12.2

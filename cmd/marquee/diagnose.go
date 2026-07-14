@@ -41,6 +41,7 @@ func listenErrorMessage(addr string, err error) string {
 func portHolder(port string) (pid int, name string, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), portLookupTimeout)
 	defer cancel()
+	// #nosec G204 -- port comes from the operator-supplied --listen address (net.SplitHostPort), never from HTTP input, and lsof is a fixed argv.
 	out, err := exec.CommandContext(ctx, "lsof", "-ti", "tcp:"+port, "-sTCP:LISTEN").Output()
 	if err != nil {
 		return 0, "", false
@@ -51,6 +52,7 @@ func portHolder(port string) (pid int, name string, ok bool) {
 		return 0, "", false
 	}
 	name = "unknown"
+	// #nosec G204 -- pid is an integer parsed from lsof output, and ps runs with a fixed argv; no value here originates from HTTP input.
 	if psOut, psErr := exec.CommandContext(ctx, "ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output(); psErr == nil {
 		if comm := strings.TrimSpace(string(psOut)); comm != "" {
 			name = filepath.Base(comm)

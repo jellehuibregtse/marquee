@@ -76,6 +76,7 @@ func New(dir string, opts ...Option) *Poller {
 	for _, opt := range opts {
 		opt(p)
 	}
+	// #nosec G118 -- cancel is stored in p.cancel and invoked in Stop; gosec cannot see the deferred call through the struct field.
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	go p.loop()
 	return p
@@ -133,6 +134,7 @@ func (p *Poller) refresh() {
 func (p *Poller) fetch() (*PR, error) {
 	ctx, cancel := context.WithTimeout(p.ctx, p.timeout)
 	defer cancel()
+	// #nosec G204 -- executable defaults to "gh" (overridden only by tests) and all arguments are fixed literals, none from HTTP input.
 	cmd := exec.CommandContext(ctx, p.executable, "pr", "view", "--json", "number,title,url")
 	cmd.Dir = p.dir
 	cmd.WaitDelay = time.Second

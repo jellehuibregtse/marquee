@@ -1,0 +1,16 @@
+version: "2"
+
+linters:
+  enable:
+    - gosec
+    - errorlint
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errorlint
+      - path: e2e/testupstream/
+        linters:
+          - gosec

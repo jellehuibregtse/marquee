@@ -41,6 +41,7 @@ func removePidfile(path string) {
 // removed silently. A still-alive group gets a warning on w and nothing
 // else — deliberately no kill, as the warning text explains.
 func warnStaleChild(path string, w io.Writer) {
+	// #nosec G304 -- path is derived internally from the listen address via a sha256 hash under the user cache dir, never from HTTP or user input.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return

@@ -101,6 +101,20 @@ func (p *Poller) Stop() {
 	<-p.done
 }
 
+// Repoint swaps the directory the poller looks up PRs in and kicks off a
+// refresh in the background, so after a worktree switch the PR chip catches
+// up to the new branch without waiting for the next 60s tick. The swap and
+// the concurrent PR reads share the same mutex, so a reader never observes a
+// torn state; the refresh runs off-goroutine so a slow gh never blocks the
+// switch that triggered the repoint.
+func (p *Poller) Repoint(dir string) {
+	p.mu.Lock()
+	p.dir = dir
+	p.pr = nil
+	p.mu.Unlock()
+	go p.refresh()
+}
+
 func (p *Poller) loop() {
 	defer close(p.done)
 	p.refresh()
@@ -132,11 +146,14 @@ func (p *Poller) refresh() {
 }
 
 func (p *Poller) fetch() (*PR, error) {
+	p.mu.Lock()
+	dir := p.dir
+	p.mu.Unlock()
 	ctx, cancel := context.WithTimeout(p.ctx, p.timeout)
 	defer cancel()
 	// #nosec G204 -- executable defaults to "gh" (overridden only by tests) and all arguments are fixed literals, none from HTTP input.
 	cmd := exec.CommandContext(ctx, p.executable, "pr", "view", "--json", "number,title,url")
-	cmd.Dir = p.dir
+	cmd.Dir = dir
 	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()
 	if err != nil {

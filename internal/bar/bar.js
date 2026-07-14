@@ -100,6 +100,101 @@ a:focus-visible {
   clip-path: inset(50%);
   white-space: nowrap;
 }
+.switcher {
+  position: relative;
+  display: inline-flex;
+}
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: rgba(0, 0, 0, 0.07);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.switch:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+.menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  min-width: 160px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  margin: 0;
+  border-radius: 8px;
+  background: #f5f5f4;
+  color: #1c1c1c;
+  border: 1px solid #d0d0ce;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+:host([position="top"]) .menu {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+.menu button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.menu button:hover,
+.menu button:focus-visible {
+  background: rgba(0, 0, 0, 0.1);
+  outline: none;
+}
+.menu button[aria-current="true"] {
+  font-weight: 600;
+}
+.spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .spinner {
+    animation: marquee-spin 0.7s linear infinite;
+  }
+}
+@keyframes marquee-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-color-scheme: dark) {
+  .menu {
+    background: #262626;
+    color: #ededed;
+    border-color: #4d4d4d;
+  }
+  .switch {
+    background: rgba(255, 255, 255, 0.12);
+  }
+  .menu button:hover,
+  .menu button:focus-visible {
+    background: rgba(255, 255, 255, 0.16);
+  }
+}
 `;
 
 const TEMPLATE = `
@@ -110,6 +205,12 @@ const TEMPLATE = `
     <span class="dirty" hidden><span aria-hidden="true">●</span><span class="visually-hidden">uncommitted changes</span></span>
     <span class="chip worktree" hidden></span>
     <a class="chip pr" hidden target="_blank" rel="noreferrer"></a>
+    <span class="switcher" hidden>
+      <button type="button" class="switch" aria-haspopup="menu" aria-expanded="false" aria-label="Switch worktree">
+        <span class="switch-label"></span>
+      </button>
+      <div class="menu" role="menu" aria-label="Worktrees" hidden></div>
+    </span>
   </div>
   <button type="button" class="toggle"></button>
 </div>
@@ -154,6 +255,12 @@ function branchColors(branch, dark) {
   };
 }
 
+function textSpan(text) {
+  const span = document.createElement("span");
+  span.textContent = text;
+  return span;
+}
+
 function safeHttpUrl(value) {
   try {
     const url = new URL(value, location.href);
@@ -171,12 +278,20 @@ class MarqueeBar extends HTMLElement {
   #worktree;
   #pr;
   #toggle;
+  #switcher;
+  #switch;
+  #switchLabel;
+  #menu;
   #status = null;
   #timer = 0;
   #warned = false;
   #collapsed = false;
+  #token = "";
+  #switching = false;
+  #menuOpen = false;
   #dark = window.matchMedia("(prefers-color-scheme: dark)");
   #onSchemeChange = () => this.#render();
+  #onDocPointerDown = (event) => this.#onOutsidePointer(event);
 
   constructor() {
     super();
@@ -189,7 +304,17 @@ class MarqueeBar extends HTMLElement {
     this.#worktree = this.shadowRoot.querySelector(".worktree");
     this.#pr = this.shadowRoot.querySelector(".pr");
     this.#toggle = this.shadowRoot.querySelector(".toggle");
+    this.#switcher = this.shadowRoot.querySelector(".switcher");
+    this.#switch = this.shadowRoot.querySelector(".switch");
+    this.#switchLabel = this.shadowRoot.querySelector(".switch-label");
+    this.#menu = this.shadowRoot.querySelector(".menu");
     this.#toggle.addEventListener("click", () => this.#onToggle());
+    this.#switch.addEventListener("click", () => this.#toggleMenu());
+    this.#menu.addEventListener("keydown", (event) => this.#onMenuKeydown(event));
+    this.#switch.addEventListener("keydown", (event) => this.#onTriggerKeydown(event));
+    // The token is delivered only through the injected element attribute on a
+    // same-origin page; it is never read from any network response.
+    this.#token = this.getAttribute("token") || "";
     try {
       this.#collapsed = sessionStorage.getItem(STORAGE_KEY) === "1";
     } catch {
@@ -200,6 +325,7 @@ class MarqueeBar extends HTMLElement {
 
   connectedCallback() {
     this.#dark.addEventListener("change", this.#onSchemeChange);
+    document.addEventListener("pointerdown", this.#onDocPointerDown);
     this.#poll();
     this.#timer = setInterval(() => this.#poll(), POLL_INTERVAL_MS);
   }
@@ -207,6 +333,7 @@ class MarqueeBar extends HTMLElement {
   disconnectedCallback() {
     clearInterval(this.#timer);
     this.#dark.removeEventListener("change", this.#onSchemeChange);
+    document.removeEventListener("pointerdown", this.#onDocPointerDown);
   }
 
   async #poll() {
@@ -255,7 +382,160 @@ class MarqueeBar extends HTMLElement {
       this.#pr.href = prHref;
       this.#pr.textContent = `#${pr.number} ${pr.title}`;
     }
+    this.#renderSwitcher(status);
     this.#toggle.style.background = this.#collapsed ? colors.background : "";
+  }
+
+  // #renderSwitcher shows the worktree dropdown only when there is a token
+  // (so switching is actually available) and more than one worktree to choose
+  // between. All worktree text is written via textContent, never innerHTML.
+  #renderSwitcher(status) {
+    const worktrees = Array.isArray(status.worktrees) ? status.worktrees : [];
+    const canSwitch = this.#token !== "" && worktrees.length > 1;
+    this.#switcher.hidden = !canSwitch;
+    if (!canSwitch) {
+      this.#closeMenu();
+      return;
+    }
+    if (this.#switching) {
+      this.#switch.setAttribute("aria-busy", "true");
+      this.#switch.disabled = true;
+      this.#switchLabel.replaceChildren(this.#spinnerNode(), textSpan("Switching…"));
+      return;
+    }
+    this.#switch.removeAttribute("aria-busy");
+    this.#switch.disabled = false;
+    this.#switchLabel.textContent = "Worktrees";
+    this.#buildMenu(worktrees, status.worktree);
+  }
+
+  #spinnerNode() {
+    const span = document.createElement("span");
+    span.className = "spinner";
+    span.setAttribute("aria-hidden", "true");
+    return span;
+  }
+
+  #buildMenu(worktrees, current) {
+    const currentSlug = current && current.slug ? current.slug : "";
+    const items = worktrees.map((worktree) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.setAttribute("role", "menuitem");
+      const slug = String(worktree.slug || "");
+      item.dataset.slug = slug;
+      const isCurrent = slug === currentSlug;
+      if (isCurrent) item.setAttribute("aria-current", "true");
+      const label = document.createElement("span");
+      label.textContent = slug + (isCurrent ? " (current)" : "");
+      item.replaceChildren(label);
+      item.addEventListener("click", () => {
+        this.#closeMenu();
+        if (!isCurrent) this.#switchTo(slug, false);
+      });
+      return item;
+    });
+    this.#menu.replaceChildren(...items);
+  }
+
+  #toggleMenu() {
+    if (this.#menuOpen) {
+      this.#closeMenu();
+    } else {
+      this.#openMenu();
+    }
+  }
+
+  #openMenu() {
+    if (this.#switching || this.#switcher.hidden) return;
+    this.#menuOpen = true;
+    this.#menu.hidden = false;
+    this.#switch.setAttribute("aria-expanded", "true");
+    const first = this.#menu.querySelector("button");
+    if (first) first.focus();
+  }
+
+  #closeMenu(returnFocus) {
+    if (!this.#menuOpen) {
+      this.#menu.hidden = true;
+      return;
+    }
+    this.#menuOpen = false;
+    this.#menu.hidden = true;
+    this.#switch.setAttribute("aria-expanded", "false");
+    if (returnFocus) this.#switch.focus();
+  }
+
+  #onTriggerKeydown(event) {
+    if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      this.#openMenu();
+    }
+  }
+
+  #onMenuKeydown(event) {
+    const items = Array.from(this.#menu.querySelectorAll("button"));
+    const index = items.indexOf(this.shadowRoot.activeElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this.#closeMenu(true);
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      const next = items[Math.min(index + 1, items.length - 1)];
+      if (next) next.focus();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (index <= 0) {
+        this.#closeMenu(true);
+      } else {
+        items[index - 1].focus();
+      }
+    }
+  }
+
+  #onOutsidePointer(event) {
+    if (this.#menuOpen && !event.composedPath().includes(this)) {
+      this.#closeMenu();
+    }
+  }
+
+  async #switchTo(slug, confirmed) {
+    if (this.#token === "" || this.#switching) return;
+    this.#switching = true;
+    this.#render();
+    try {
+      const body = confirmed ? { slug, confirm: true } : { slug };
+      const response = await fetch("/__marquee/switch", {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Marquee-Token": this.#token,
+        },
+        body: JSON.stringify(body),
+      });
+      if (response.status === 409) {
+        const data = await response.json().catch(() => null);
+        if (data && data.error === "dirty" && !confirmed) {
+          this.#switching = false;
+          if (window.confirm(`This worktree has uncommitted changes. Switch to ${slug} anyway?`)) {
+            return this.#switchTo(slug, true);
+          }
+          this.#render();
+          return;
+        }
+        console.warn("marquee: switch rejected", data);
+      } else if (!response.ok) {
+        console.warn("marquee: switch failed", response.status);
+      }
+    } catch (error) {
+      console.warn("marquee: switch request failed", error);
+    } finally {
+      this.#switching = false;
+    }
+    // Refresh promptly so the bar reflects the new worktree (or recovers the
+    // idle switcher if the switch was refused).
+    this.#poll();
   }
 
   #onToggle() {

@@ -2,8 +2,8 @@
 
 marquee sits in an unusually trusted position for a dev tool: it terminates
 all your browser's traffic to the wrapped app, injects a script into every
-HTML page, and (in v2) will expose an HTTP endpoint that kills and spawns
-processes. Its guards are therefore structural, not optional.
+HTML page, and exposes an HTTP endpoint (`POST /__marquee/switch`) that kills
+and spawns processes. Its guards are therefore structural, not optional.
 
 This document is the threat-model write-up for spec §6. It enumerates each
 threat we defend against, the mitigation **as actually implemented** (with
@@ -18,7 +18,7 @@ test is labelled **unverified** rather than claimed.
 ## Threat 1 — LAN peers
 
 **Threat.** Anyone on your network reaching the proxy — and through it your
-dev app (which has no auth of its own) and, in v2, the switch endpoint.
+dev app (which has no auth of its own) and the switch endpoint.
 
 **Mitigation (implemented).** Loopback-only binding is the hard default.
 `validateListen` refuses to start when `--listen` is not a loopback address;
@@ -112,11 +112,12 @@ endpoints validate `Host`.
 **Threat.** Any page in the browser issuing a request to a marquee endpoint
 that changes state (e.g. a background tab firing `GET
 /__marquee/toggle?bar=off` via `<img src>` on an interval to persistently
-suppress the bar's safety indicator; in v2, a page hitting
-`/__marquee/switch`).
+suppress the bar's safety indicator; or a page hitting `/__marquee/switch` to
+make the proxy kill and respawn processes).
 
-**Mitigation (implemented, partial).** The only state-changing endpoint in
-v1 is the bar toggle. The Host allowlist is a DNS-rebinding defense, not a
+**Mitigation (implemented).** There are two state-changing endpoints: the
+cosmetic bar toggle and the process-spawning worktree switch, each guarded in
+proportion to its power. The Host allowlist is a DNS-rebinding defense, not a
 CSRF one, so the toggle's mutating path (`bar=on|off`) additionally consults
 `Sec-Fetch-Site`, which browsers set and page JS cannot forge: a typed
 address-bar navigation sends `none` and a same-origin fetch sends
@@ -141,48 +142,100 @@ toggle is GET-only (405 otherwise) and, like every internal endpoint, sets
   `TestEnvDisablesInjectionAndToggleCannotReenable` in
   `internal/proxy/bypass_test.go`.
 
-**Deferred to v2.** The §3.5 rules for *process*-state-changing endpoints —
-a per-process random token minted at startup, embedded only via the injected
-snippet, and required as a header on every state-changing call — are **not
-implemented**; no such endpoint exists yet. The `/__marquee/switch` endpoint
-lands in v2 and must enforce them. The toggle deliberately opts out of the
-token because it flips only whether the bar snippet is spliced into HTML — it
-never touches process state or proxying — so `Sec-Fetch-Site` alone is the
-proportionate guard. `MARQUEE_DISABLE_BAR=1` at launch is a hard off the
-toggle cannot override.
+**Process-state-changing endpoint (implemented).** The §3.5 rules for the
+*process*-state-changing endpoint are now implemented for
+`POST /__marquee/switch` (the worktree switcher), which kills and respawns the
+child dev server. It carries a **stricter** guard stack than the cosmetic
+toggle, all of which must pass before any process action (see the "Worktree
+switch endpoint" section below for the full stack and the token lifecycle):
+
+1. **POST only** — the guarded mux answers any other method with 405.
+2. **Strict same-origin** — `Sec-Fetch-Site: same-origin`, or (when the header
+   is absent) an `Origin` whose scheme+host+port equals the request Host.
+   Unlike the toggle, `Sec-Fetch-Site: none` (a typed address-bar navigation)
+   is **not** accepted: a process-spawning endpoint must be provably
+   same-origin. Otherwise 403.
+3. **Per-process token** — a 256-bit `crypto/rand` token minted once at
+   startup, delivered to the page **only** through the injected
+   `<marquee-bar token="…">` attribute, echoed by bar.js as the
+   `X-Marquee-Token` header, and compared with
+   `crypto/subtle.ConstantTimeCompare`. Missing/wrong token → 403.
+
+The toggle deliberately opts out of the token because it flips only whether the
+bar snippet is spliced into HTML — it never touches process state or proxying —
+so `Sec-Fetch-Site` alone is the proportionate guard. `MARQUEE_DISABLE_BAR=1`
+at launch is a hard off the toggle cannot override.
+
+The token defends a **browser-driven** cross-site request on the loopback
+default; it is not a secret against an active network reader. Under
+`--unsafe-listen`, proxied app traffic is no longer Host-guarded, so a LAN peer
+can fetch an injected page, read the `token` attribute, and replay it from a
+non-browser client forging `Host` and `Sec-Fetch-Site`. That falls inside the
+Threat 1 accepted risk — loopback is the hard default and `--unsafe-listen`
+prints a persistent, non-suppressible warning — not a defense the token was
+meant to provide.
+
+- Code: `sameOrigin`, `originMatchesHost`, `Handler.tokenOK`, `Handler.serve`
+  in `internal/switcher/switcher.go`; the token minted by `mintToken` in
+  `cmd/marquee/main.go`, threaded through `proxy.Config.SwitchToken` into the
+  injected snippet (`barSnippetForToken` in `internal/proxy/inject.go`) and
+  into `switcher.Config.Token`.
+- Proven by: `TestCrossOriginRejectedNoProcessAction` (cross-site, same-site,
+  `none`, missing-both, and Origin-mismatch all → 403 **and** no restart),
+  `TestOriginFallbackMatchesHostIsAllowed`,
+  `TestMissingOrWrongTokenRejectedNoProcessAction`,
+  `TestEmptyTokenRejectsEveryRequest`, `TestHostGuardEnforced`,
+  `TestMethodNotAllowed` in `internal/switcher/switcher_test.go`;
+  `TestInjectCarriesSwitchToken`, `TestInjectWithoutTokenUsesTokenlessSnippet`,
+  `TestBarSnippetForToken` (the token reaches the page only through the
+  injected element) in `internal/proxy/switch_test.go`.
 
 ## Threat 4 — Command / path injection via slug
 
 **Threat.** A `switch` slug flowing toward process spawning and cwd
 selection, letting HTTP input shell out or escape the intended directory.
 
-**Status: deferred (no attack surface in v1).** There is no `switch`
-endpoint and no slug handling in the code today, so there is nothing to
-inject into over HTTP. The only process spawn in v1 is the child dev server,
-launched by `runner.New` from the operator's own `--` argv (`opts.command`
-from the CLI), never from request data. The `#nosec G204` annotations on the
-subprocess launches in `runner`, `gitinfo`, `ghinfo`, and the browser opener
-document exactly this: the argv is a fixed literal or operator-supplied, never
-HTTP-derived. The pidfile path is derived from a sha256 of the listen address
-under the user cache dir (`#nosec G304`), never from request input.
+**Mitigation (implemented).** The `POST /__marquee/switch` slug flows toward a
+`cwd` selection (the runner restarts the child in a worktree directory), so it
+is the one place HTTP input reaches process control. It is defended by never
+letting the request choose a path:
 
-When the v2 switch endpoint lands, the slug must be only an exact-match lookup
-key into the parsed `git worktree list` set — never path-joined, never
-shelled — and any `--switch-hook` must be operator-configured on the command
-line, never influenced by HTTP input.
+- **The slug is only ever an exact-match lookup key.** `resolveWorktree`
+  compares the posted slug against the `Slug` of each worktree parsed from
+  git's own `git worktree list --porcelain` output (via `gitinfo.Collect`,
+  reusing the poller's parser). The **absolute path handed to the runner comes
+  from git's output**, never from the request. An unknown slug, or any
+  traversal shape (`../evil`, `/absolute/path`, `..%2f..`, `feature/..`, `.`,
+  empty), simply matches no worktree slug and is rejected with **400 and no
+  process action**. An ambiguous duplicate slug (more than one match) is
+  likewise rejected — the switch never acts on an unresolved target.
+- **No path-join, no `filepath.Clean`-and-use, no stat of a request-derived
+  path, no shell.** The slug is never concatenated with a base directory,
+  never cleaned into a path, never passed to a shell. The runner's spawn is
+  still the operator's original `--` argv; only its `cwd` changes, and only to
+  a git-reported worktree path.
+- **The existing `#nosec G204` annotations still hold.** The argv in `runner`,
+  `gitinfo`, `ghinfo`, and the browser opener is a fixed literal or
+  operator-supplied, never HTTP-derived; the switch changes the runner's `cwd`
+  to a git-reported path, not the argv.
 
-- Code: `runner.New` call site in `cmd/marquee/main.go`; `internal/runner/runner.go`;
-  `pidfilePath` / `warnStaleChild` in `cmd/marquee/pidfile.go`.
-- Proven by: the runner's spawn/signal tests (`TestStartSetsOwnProcessGroup`,
-  `TestEnvReachesChild`, `TestStopKillsGrandchildren`, …) in
-  `internal/runner/runner_test.go` exercise the fixed-argv spawn path. The
-  slug-injection defense itself is **unverified** — it cannot be tested until
-  the endpoint exists. AGENTS.md requires an abuse test in this suite for
-  anything that spawns, signals, or selects a cwd, which the v2 endpoint will
-  carry.
+`--switch-hook` (per-worktree setup such as `pnpm install`) is a **deliberate
+deferral** — not built in this change. When adopted it must be
+operator-configured on the command line, never influenced by HTTP input.
 
-The one signal-adjacent path that *does* exist — the stale-child pidfile
-warning — is hardened against corrupt input: see Threat 7's pidfile note.
+The one signal-adjacent path from v1 — the stale-child pidfile warning — is
+hardened against corrupt input: see Threat 7's pidfile note.
+
+- Code: `resolveWorktree`, `Handler.serve` in `internal/switcher/switcher.go`;
+  `gitinfo.Collect` / `parseWorktrees` in `internal/gitinfo/gitinfo.go`; the
+  runner `cwd` change in `Runner.Restart` (`internal/runner/runner.go`).
+- Proven by: `TestUnknownOrTraversalSlugRejectedNoProcessAction` (every unknown
+  and traversal shape → 400 with **no restart and no repoint**),
+  `TestValidSwitchAgainstRealRepoRestartsAndRepoints` (a real temp repo with
+  two worktrees: a valid, same-origin, correctly-tokened switch restarts the
+  child in **git's** worktree path and repoints the pollers there),
+  `TestRestartFailureReported` (a failed restart does not repoint) in
+  `internal/switcher/switcher_test.go`.
 
 ## Threat 5 — Malicious / compromised upstream responses
 
@@ -385,6 +438,80 @@ forbids same-origin scripts).
   `TestInjectLeavesCSPUntouchedOnNonInjectedResponse` in
   `internal/proxy/csp_test.go`.
 
+## Worktree switch endpoint
+
+`POST /__marquee/switch` is the highest-risk surface in marquee: it kills and
+respawns the wrapped dev server in a different git worktree. It is registered
+through the guarded `InternalMux` (so it inherits the Host allowlist and
+`no-store` by construction) and enforces a full guard stack — **all** guards
+must pass, in this order, before any process action; every failure returns a
+machine-readable JSON error and takes no action:
+
+1. **Method** — POST only; the mux method pattern answers others with 405.
+2. **Host allowlist** — the guarded mux rejects a forbidden Host with 403
+   (Threat 2).
+3. **Strict same-origin** — `Sec-Fetch-Site: same-origin`, or an `Origin`
+   matching the request Host when the header is absent; `none` is rejected.
+   Otherwise 403 (Threat 3).
+4. **Constant-time token** — `X-Marquee-Token` must equal the per-process
+   token under `subtle.ConstantTimeCompare`; otherwise 403 (Threat 3).
+5. **Concurrency lock** — a mutex serializes switches; a second switch while
+   one is in progress gets 409 `busy`, so two POSTs cannot race the runner.
+6. **Strict slug validation** — exact match into `git worktree list`; unknown
+   or traversal shapes get 400 `unknown_slug` (Threat 4).
+7. **Dirty safety** — if the current worktree has uncommitted changes and the
+   target is not the main worktree and the request did not set `confirm=true`,
+   the switch is refused with 409 `dirty` (a machine-readable reason the bar
+   uses to prompt for confirmation). Switching **back to the main worktree is
+   always allowed**, dirty or not.
+
+Request-body parsing precedes the concurrency lock: a malformed or empty body
+returns 400 `bad_request` before step 5. This is side-effect-free (no git
+subcommand, no process action), so it does not change the "no action before the
+guards pass" guarantee.
+
+Only after all guards pass does marquee stop the child and
+`runner.Restart(ctx, worktreePath)`, then **repoint both the gitinfo and
+ghinfo pollers** to the new worktree (otherwise the bar keeps reporting the old
+worktree — the exact lie the tool exists to prevent), then TCP-health-poll the
+new child. `Poller.Repoint` swaps the collection directory under the same mutex
+that guards the cached snapshot, so a concurrent status read never sees a torn
+state (covered by `-race` tests). While a switch is in progress, proxied HTML
+navigations receive a self-refreshing "switching to *slug*…" page (the slug is
+HTML-escaped defensively) and non-HTML requests a plain 503; the switch POST
+itself and the status endpoint are on the internal namespace and are never
+blocked by that page.
+
+**Token lifecycle.** The token is 256 bits from `crypto/rand`, hex-encoded (no
+HTML-special characters, so it embeds without escaping), minted **once** at
+startup and constant for the process. It reaches the browser **only** through
+the injected `<marquee-bar token="…">` attribute on same-origin app pages —
+never in the status JSON, any other GET response, or any log line (a failed
+switch logs only the non-secret slug). If minting fails, marquee runs with no
+token: the endpoint rejects every request and the bar hides its switcher, while
+everything else keeps working (fail-open). Attach mode configures no token and
+registers no switch endpoint. Golden fixtures stay valid because the token-less
+snippet is byte-identical to before; the tokened case is asserted separately
+with a fixed token, and no golden encodes the random value.
+
+- Code: `internal/switcher/switcher.go` (whole file); `serveSwitching` /
+  `renderSwitching` in `internal/proxy/switching.go`; `SetSwitchingProbe` /
+  `switchingSlug` and `Config.SwitchToken` in `internal/proxy/proxy.go`;
+  `barSnippetForToken` in `internal/proxy/inject.go`; `Poller.Repoint` in
+  `internal/gitinfo/poller.go` and `internal/ghinfo/ghinfo.go`; the wiring
+  (`mintToken`, `switcher.New`, `switcher.Register`, `SetSwitchingProbe`) in
+  `cmd/marquee/main.go`.
+- Proven by: the abuse and happy-path tests listed under Threats 3 and 4,
+  plus `TestDirtyRefusedWithoutConfirm`, `TestDirtyConfirmedAllowed`,
+  `TestDirtySwitchToMainAlwaysAllowed`, `TestConcurrentSwitchRejected`,
+  `TestSwitchingSlugReportedWhileInProgress` in
+  `internal/switcher/switcher_test.go`;
+  `TestSwitchingPageServedWhileSwitching`, `TestSwitchingPageEscapesSlug`,
+  `TestSwitchingProbeAbsentBehavesNormally` in
+  `internal/proxy/switch_test.go`; `TestPollerRepointSwitchesDirectory`
+  (`internal/gitinfo/poller_repoint_test.go`),
+  `TestRepointChangesLookupDirectory` (`internal/ghinfo/ghinfo_repoint_test.go`).
+
 ## Standing rules
 
 Enforced via AGENTS.md, applied to every PR:
@@ -429,9 +556,10 @@ local, single-user dev tool; they are documented here, not fixed.
    loopback is always IP-verified; for the two reserved names it is a
    name-based decision.
 
-## Not yet implemented (v2)
+## Deferred
 
-- The per-process token guard and the `/__marquee/switch`
-  process-state-changing endpoint (Threat 3 / Threat 4). None exists yet; the
-  switch endpoint and its §3.5 guards land in v2 and must ship with an abuse
-  test in this suite.
+- **`--switch-hook` (per-worktree setup).** Running a setup command such as
+  `pnpm install` when a switched-into worktree lacks `node_modules` is a
+  deliberate follow-up, not built here. When adopted it must be
+  operator-configured on the command line and never influenced by HTTP input
+  (Threat 4).

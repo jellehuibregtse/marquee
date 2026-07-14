@@ -12,10 +12,28 @@ import (
 	"sync"
 )
 
-// barSnippet is spliced immediately before the final </body> of injectable
-// HTML documents. The /__marquee/bar.js path is the contract with the bar
-// task, which serves the script from the internal mux.
-const barSnippet = `<script type="module" src="/__marquee/bar.js"></script><marquee-bar></marquee-bar>`
+// barScriptTag loads the bar module; the /__marquee/bar.js path is the
+// contract with the bar task, which serves the script from the internal mux.
+const barScriptTag = `<script type="module" src="/__marquee/bar.js"></script>`
+
+// barSnippet is the token-less snippet spliced immediately before the final
+// </body> of injectable HTML documents when no switch token is configured
+// (attach mode, or token minting failed). barSnippetForToken adds the token
+// attribute when the switcher is active.
+const barSnippet = barScriptTag + `<marquee-bar></marquee-bar>`
+
+// barSnippetForToken builds the injected snippet. When token is non-empty it
+// is rendered as the <marquee-bar> element's token attribute, which bar.js
+// echoes as the X-Marquee-Token header on /__marquee/switch — the CSRF token
+// only ever reaches the page through this same-origin injection, never through
+// any GET/status response or log. The token is crypto/rand hex, so it carries
+// no HTML-special characters and needs no escaping.
+func barSnippetForToken(token string) string {
+	if token == "" {
+		return barSnippet
+	}
+	return barScriptTag + `<marquee-bar token="` + token + `"></marquee-bar>`
+}
 
 // injectSizeCap is the largest body the injector will buffer. Anything
 // bigger passes through untouched — and unbuffered when Content-Length
@@ -30,13 +48,14 @@ type injector struct {
 	logger   *log.Logger
 	switches *barSwitches
 	relaxCSP bool
+	snippet  string
 
 	mu      sync.Mutex
 	lastMsg string
 }
 
-func newInjector(logger *log.Logger, switches *barSwitches, relaxCSP bool) *injector {
-	return &injector{logger: logger, switches: switches, relaxCSP: relaxCSP}
+func newInjector(logger *log.Logger, switches *barSwitches, relaxCSP bool, token string) *injector {
+	return &injector{logger: logger, switches: switches, relaxCSP: relaxCSP, snippet: barSnippetForToken(token)}
 }
 
 // modifyResponse is the ReverseProxy.ModifyResponse hook. It always returns
@@ -149,9 +168,9 @@ func (in *injector) inject(resp *http.Response) {
 		return
 	}
 
-	spliced := make([]byte, 0, len(buf)+len(barSnippet))
+	spliced := make([]byte, 0, len(buf)+len(in.snippet))
 	spliced = append(spliced, buf[:idx]...)
-	spliced = append(spliced, barSnippet...)
+	spliced = append(spliced, in.snippet...)
 	spliced = append(spliced, buf[idx:]...)
 	resp.Body = readCloser{bytes.NewReader(spliced), upstream}
 	resp.ContentLength = int64(len(spliced))

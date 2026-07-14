@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,6 +43,12 @@ type Config struct {
 	// exact match (port ignored); a "*.example.test" wildcard matches any
 	// subdomain. See NewInternalMux for the matching rules.
 	AllowHosts []string
+	// SwitchToken is the per-process CSRF token for the worktree switcher. It
+	// is rendered into the injected <marquee-bar> element so bar.js can echo
+	// it as the X-Marquee-Token header on POST /__marquee/switch, and the
+	// switch handler compares it in constant time. Empty means no switcher
+	// (attach mode, or token minting failed): the token-less snippet is used.
+	SwitchToken string
 	// Logger receives operational messages (upstream errors). Defaults
 	// to log.Default().
 	Logger *log.Logger
@@ -61,6 +68,13 @@ type Handler struct {
 	internal *InternalMux
 	probe    *probe
 	logger   *log.Logger
+
+	// switching holds a func() string reporting the slug of an in-progress
+	// worktree switch (empty when idle), so proxied navigations can be shown
+	// a "switching…" page instead of racing a restarting child. Stored via
+	// SetSwitchingProbe as an atomic.Value to stay race-free without coupling
+	// the proxy to the switcher package (which imports this one).
+	switching atomic.Value
 }
 
 // New builds a Handler for the given configuration.
@@ -104,7 +118,7 @@ func New(cfg Config) *Handler {
 			r.Out.Header.Del("X-Marquee")
 		},
 		FlushInterval:  -1,
-		ModifyResponse: newInjector(logger, switches, cfg.RelaxCSP).modifyResponse,
+		ModifyResponse: newInjector(logger, switches, cfg.RelaxCSP, cfg.SwitchToken).modifyResponse,
 		ErrorLog:       logger,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			logger.Printf("marquee: upstream error for %s %s: %v", r.Method, r.URL.Path, err)
@@ -122,9 +136,30 @@ func (h *Handler) Internal() *InternalMux {
 	return h.internal
 }
 
+// SetSwitchingProbe installs a callback reporting the slug of an in-progress
+// worktree switch (empty string when none). While it reports a slug, proxied
+// (non-internal) navigations receive a self-refreshing "switching…" page
+// rather than being forwarded to a child that is mid-restart. The switcher
+// wires this after construction; before it does, the proxy behaves as before.
+func (h *Handler) SetSwitchingProbe(fn func() string) {
+	h.switching.Store(fn)
+}
+
+func (h *Handler) switchingSlug() string {
+	fn, _ := h.switching.Load().(func() string)
+	if fn == nil {
+		return ""
+	}
+	return fn()
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if isInternalPath(r.URL.Path) {
 		h.internal.ServeHTTP(w, r)
+		return
+	}
+	if slug := h.switchingSlug(); slug != "" {
+		serveSwitching(w, r, slug)
 		return
 	}
 	if !h.probe.up() {

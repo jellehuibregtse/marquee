@@ -349,7 +349,7 @@ func TestCapOverrunSeamClosesUpstreamBodyOnce(t *testing.T) {
 		Body:          upstream,
 		ContentLength: -1,
 	}
-	in := newInjector(log.New(io.Discard, "", 0), newBarSwitches(false), false)
+	in := newInjector(log.New(io.Discard, "", 0), newBarSwitches(false), false, "")
 	if err := in.modifyResponse(resp); err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func (p panickingBody) Read([]byte) (int, error) { panic(p.value) }
 func (p panickingBody) Close() error             { return nil }
 
 func TestErrAbortHandlerPanicNotSwallowed(t *testing.T) {
-	in := newInjector(log.New(io.Discard, "", 0), newBarSwitches(false), false)
+	in := newInjector(log.New(io.Discard, "", 0), newBarSwitches(false), false, "")
 	resp := &http.Response{
 		StatusCode:    http.StatusOK,
 		Header:        http.Header{"Content-Type": {"text/html"}},

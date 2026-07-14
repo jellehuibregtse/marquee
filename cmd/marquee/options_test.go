@@ -1,0 +1,162 @@
+package main
+
+import (
+	"bytes"
+	"io"
+	"strings"
+	"testing"
+)
+
+func TestParseArgsDefaults(t *testing.T) {
+	opts, err := parseArgs("marquee", []string{"--", "bin/dev"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if opts.listen != "127.0.0.1:3000" {
+		t.Errorf("listen = %q, want 127.0.0.1:3000", opts.listen)
+	}
+	if opts.position != "bottom" {
+		t.Errorf("position = %q, want bottom", opts.position)
+	}
+	if opts.noOpen || opts.quiet || opts.unsafeListen {
+		t.Errorf("bool flags default true: %+v", opts)
+	}
+	if len(opts.allowHosts) != 0 {
+		t.Errorf("allowHosts = %v, want empty", opts.allowHosts)
+	}
+	if len(opts.command) != 1 || opts.command[0] != "bin/dev" {
+		t.Errorf("command = %v, want [bin/dev]", opts.command)
+	}
+}
+
+func TestParseArgsAllowHostRepeatable(t *testing.T) {
+	opts, err := parseArgs("marquee",
+		[]string{"--allow-host", "a.test", "--allow-host", "b.test", "--", "bin/dev"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	want := []string{"a.test", "b.test"}
+	if strings.Join(opts.allowHosts, ",") != strings.Join(want, ",") {
+		t.Errorf("allowHosts = %v, want %v", opts.allowHosts, want)
+	}
+}
+
+func TestParseArgsFlagsCaptured(t *testing.T) {
+	opts, err := parseArgs("marquee",
+		[]string{"--position", "top", "--quiet", "--no-open", "--unsafe-listen",
+			"--listen", "0.0.0.0:3000", "--", "bin/dev", "arg"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if opts.position != "top" || !opts.quiet || !opts.noOpen || !opts.unsafeListen {
+		t.Errorf("flags not captured: %+v", opts)
+	}
+	if opts.listen != "0.0.0.0:3000" {
+		t.Errorf("listen = %q, want 0.0.0.0:3000", opts.listen)
+	}
+	if len(opts.command) != 2 || opts.command[0] != "bin/dev" || opts.command[1] != "arg" {
+		t.Errorf("command = %v, want [bin/dev arg]", opts.command)
+	}
+}
+
+func TestParseArgsInvalidPosition(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseArgs("marquee", []string{"--position", "sideways", "--", "bin/dev"}, &buf)
+	if err == nil {
+		t.Fatal("parseArgs accepted an invalid --position")
+	}
+	if !strings.Contains(buf.String(), "invalid --position") {
+		t.Errorf("missing error message: %q", buf.String())
+	}
+}
+
+func TestParseArgsMissingCommand(t *testing.T) {
+	_, err := parseArgs("marquee", nil, io.Discard)
+	if err == nil {
+		t.Fatal("parseArgs accepted an empty command")
+	}
+}
+
+func TestParseArgsVersionNeedsNoCommand(t *testing.T) {
+	opts, err := parseArgs("marquee", []string{"--version"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if !opts.showVersion {
+		t.Error("showVersion not set")
+	}
+}
+
+func TestValidateListenLoopback(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:3000", "localhost:3000", "[::1]:3000", "app.localhost:3000"} {
+		unsafe, err := validateListen(addr, false)
+		if err != nil {
+			t.Errorf("validateListen(%q, false) = %v, want no error", addr, err)
+		}
+		if unsafe {
+			t.Errorf("validateListen(%q, false) reported unsafe, want false", addr)
+		}
+	}
+}
+
+func TestValidateListenNonLoopbackRefusedWithoutFlag(t *testing.T) {
+	_, err := validateListen("0.0.0.0:3000", false)
+	if err == nil {
+		t.Fatal("non-loopback listen accepted without --unsafe-listen")
+	}
+	if !strings.Contains(err.Error(), "--unsafe-listen") {
+		t.Errorf("refusal does not mention --unsafe-listen: %v", err)
+	}
+}
+
+func TestValidateListenNonLoopbackAllowedWithFlag(t *testing.T) {
+	unsafe, err := validateListen("0.0.0.0:3000", true)
+	if err != nil {
+		t.Fatalf("validateListen with --unsafe-listen = %v, want accepted", err)
+	}
+	if !unsafe {
+		t.Error("validateListen did not report unsafe exposure for a non-loopback address")
+	}
+}
+
+func TestValidateListenInvalidAddress(t *testing.T) {
+	if _, err := validateListen("garbage", false); err == nil {
+		t.Fatal("validateListen accepted a malformed address")
+	}
+}
+
+func TestUnsafeListenWarningIsLoud(t *testing.T) {
+	var buf bytes.Buffer
+	printUnsafeListenWarning(&buf, "0.0.0.0:3000")
+	out := buf.String()
+	if !strings.Contains(out, "0.0.0.0:3000") {
+		t.Errorf("warning omits the address: %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "network") {
+		t.Errorf("warning does not mention network exposure: %q", out)
+	}
+}
+
+func TestBrowserURL(t *testing.T) {
+	cases := map[string]string{
+		"127.0.0.1:3000": "http://127.0.0.1:3000",
+		"localhost:8080": "http://localhost:8080",
+		"0.0.0.0:3000":   "http://127.0.0.1:3000",
+		":3000":          "http://127.0.0.1:3000",
+		"[::]:3000":      "http://127.0.0.1:3000",
+	}
+	for listen, want := range cases {
+		if got := browserURL(listen); got != want {
+			t.Errorf("browserURL(%q) = %q, want %q", listen, got, want)
+		}
+	}
+}
+
+func TestBrowserCommand(t *testing.T) {
+	if got := browserCommand("darwin", "http://x").Args[0]; got != "open" {
+		t.Errorf("darwin opener = %q, want open", got)
+	}
+	if got := browserCommand("linux", "http://x").Args[0]; got != "xdg-open" {
+		t.Errorf("linux opener = %q, want xdg-open", got)
+	}
+}

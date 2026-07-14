@@ -224,6 +224,11 @@ class MarqueeBar extends HTMLElement {
       return;
     }
     this.#wrap.hidden = false;
+    if (status.position === "top") {
+      this.setAttribute("position", "top");
+    } else {
+      this.removeAttribute("position");
+    }
     const colors = branchColors(status.branch, this.#dark.matches);
     this.#branch.textContent = status.branch;
     this.#branch.style.background = colors.background;

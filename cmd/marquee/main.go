@@ -34,75 +34,69 @@ func main() {
 }
 
 func run() int {
-	listen := flag.String("listen", "127.0.0.1:3000", "address to listen on (loopback only)")
-	internalPort := flag.Int("internal-port", 0, "port the child binds to (0 picks a free port)")
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: marquee [--listen addr] [--internal-port port] -- command [args...]")
-		flag.PrintDefaults()
+	opts, err := parseArgs(os.Args[0], os.Args[1:], os.Stderr)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
 	}
-	flag.Parse()
 
-	if *showVersion {
+	log := newLogger(os.Stderr, opts.quiet)
+
+	if opts.showVersion {
 		fmt.Printf("marquee %s (commit %s, built %s)\n", version, commit, date)
 		return 0
 	}
 
-	command := flag.Args()
-	if len(command) == 0 {
-		flag.Usage()
-		return 2
-	}
-
 	workdir, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "marquee: could not determine working directory: %v\n", err)
+		log.Error("could not determine working directory: %v", err)
 		return 1
 	}
 
-	host, _, err := net.SplitHostPort(*listen)
+	unsafeAllowed, err := validateListen(opts.listen, opts.unsafeListen)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "marquee: invalid --listen address %q: %v\n", *listen, err)
-		return 1
-	}
-	if !loopbackHost(host) {
-		fmt.Fprintf(os.Stderr, "marquee: refusing to listen on non-loopback address %q — marquee is a local dev tool and must not be exposed to the network\n", *listen)
+		log.Error("%v", err)
 		return 1
 	}
 
-	port := *internalPort
+	port := opts.internalPort
 	if port == 0 {
 		port, err = freePort()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "marquee: could not pick a free internal port: %v\n", err)
+			log.Error("could not pick a free internal port: %v", err)
 			return 1
 		}
 	}
 
-	ln, err := net.Listen("tcp", *listen)
+	ln, err := net.Listen("tcp", opts.listen)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, listenErrorMessage(*listen, err))
+		log.Error("%s", listenErrorMessage(opts.listen, err))
 		return 1
 	}
+	if unsafeAllowed {
+		printUnsafeListenWarning(os.Stderr, opts.listen)
+	}
 
-	pidPath, pidPathErr := pidfilePath(*listen)
+	pidPath, pidPathErr := pidfilePath(opts.listen)
 	if pidPathErr == nil {
 		warnStaleChild(pidPath, os.Stderr)
 	}
 
-	child := runner.New(command, []string{
+	child := runner.New(opts.command, []string{
 		fmt.Sprintf("PORT=%d", port),
 		"MARQUEE=1",
 		fmt.Sprintf("MARQUEE_PORT=%d", port),
 	}, "")
 	if err := child.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "marquee: could not start child: %v\n", err)
+		log.Error("could not start child: %v", err)
 		_ = ln.Close()
 		return 1
 	}
 	if pgid := child.PGID(); pidPathErr == nil && pgid > 0 {
 		if err := writePidfile(pidPath, pgid); err != nil {
-			fmt.Fprintf(os.Stderr, "marquee: could not write pidfile %s: %v\n", pidPath, err)
+			log.Warn("could not write pidfile %s: %v", pidPath, err)
 		} else {
 			defer removePidfile(pidPath)
 		}
@@ -113,19 +107,24 @@ func run() int {
 	gh := ghinfo.New(workdir)
 	defer gh.Stop()
 
-	handler := proxy.New(proxy.Config{InternalPort: port})
+	handler := proxy.New(proxy.Config{InternalPort: port, AllowHosts: opts.allowHosts})
 	status.Register(handler.Internal(), status.Deps{
 		Git:        git.Snapshot,
 		PR:         gh.PR,
 		ChildState: func() string { return string(child.Status().State) },
+		Position:   opts.position,
 	})
 
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 
-	fmt.Fprintf(os.Stderr, "marquee: listening on http://%s, upstream 127.0.0.1:%d, child: %s\n",
-		ln.Addr(), port, strings.Join(command, " "))
+	log.Info("listening on http://%s, upstream 127.0.0.1:%d, child: %s",
+		ln.Addr(), port, strings.Join(opts.command, " "))
+
+	if !opts.noOpen {
+		go openWhenHealthy(child, fmt.Sprintf("127.0.0.1:%d", port), browserURL(opts.listen), log)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -140,27 +139,47 @@ func run() int {
 
 	select {
 	case sig := <-sigCh:
-		fmt.Fprintf(os.Stderr, "marquee: received %s, stopping child\n", sig)
-		return stopChild(child, sig)
+		log.Info("received %s, stopping child", sig)
+		return stopChild(child, sig, log)
 	case <-childDone:
 		st := child.Status()
 		code := exitCode(st.Err)
-		fmt.Fprintf(os.Stderr, "marquee: child exited (%s), shutting down\n", exitReason(st.Err))
+		log.Info("child exited (%s), shutting down", exitReason(st.Err))
 		return code
 	case err := <-serveErr:
-		fmt.Fprintf(os.Stderr, "marquee: server error: %v\n", err)
-		if stopped := stopChild(child, syscall.SIGTERM); stopped != 0 {
+		log.Error("server error: %v", err)
+		if stopped := stopChild(child, syscall.SIGTERM, log); stopped != 0 {
 			return stopped
 		}
 		return 1
 	}
 }
 
-func stopChild(child *runner.Runner, sig os.Signal) int {
+// openWhenHealthy waits for the child to start accepting connections on
+// upstreamAddr and then opens url in the browser exactly once. If the
+// child exits before it is ever healthy, no browser is opened — error
+// paths never launch a browser.
+func openWhenHealthy(child *runner.Runner, upstreamAddr, url string, log *logger) {
+	for {
+		if child.Status().State == runner.StateExited {
+			return
+		}
+		conn, err := net.DialTimeout("tcp", upstreamAddr, 250*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			log.Info("app is up, opening %s", url)
+			openBrowser(url, log)
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func stopChild(child *runner.Runner, sig os.Signal, log *logger) int {
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
 	if err := child.Stop(ctx, sig); err != nil {
-		fmt.Fprintf(os.Stderr, "marquee: stopping child: %v\n", err)
+		log.Error("stopping child: %v", err)
 		return 1
 	}
 	return 0

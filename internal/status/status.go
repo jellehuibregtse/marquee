@@ -18,6 +18,9 @@ type Deps struct {
 	Git        func() gitinfo.Snapshot
 	PR         func() *ghinfo.PR
 	ChildState func() string
+	// Position is where the bar renders ("top" or "bottom"); the bar
+	// script reads it from the status payload and positions itself.
+	Position string
 }
 
 type child struct {
@@ -32,6 +35,7 @@ type payload struct {
 	PR        *ghinfo.PR              `json:"pr"`
 	Worktrees []gitinfo.Worktree      `json:"worktrees"`
 	Child     child                   `json:"child"`
+	Position  string                  `json:"position"`
 }
 
 var barScript, _ = bar.Assets.ReadFile("bar.js")
@@ -54,6 +58,7 @@ func statusHandler(deps Deps) http.Handler {
 			Worktree:  snap.Worktree,
 			RepoRoot:  snap.RepoRoot,
 			Worktrees: snap.Worktrees,
+			Position:  deps.Position,
 		}
 		if p.Worktrees == nil {
 			p.Worktrees = []gitinfo.Worktree{}

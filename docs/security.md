@@ -7,15 +7,30 @@ extend this file.
 
 ## Implemented guards
 
-### Loopback-only listener
+### Loopback-only listener (LAN peers)
 
 `marquee` refuses to start when `--listen` is not a loopback address
 (`localhost`, `*.localhost`, or an IP for which `net.IP.IsLoopback` is
-true). This keeps the proxy — and through it the dev app — unreachable
-from LAN peers. There is no override flag yet.
+true). This keeps the proxy — and through it the dev app, which has no
+auth of its own — unreachable from LAN peers.
 
-- Code: `loopbackHost` in `cmd/marquee/main.go`
-- Test: `TestLoopbackHost` in `cmd/marquee/main_test.go`
+The escape hatch is `--unsafe-listen`. A non-loopback `--listen` is a
+hard refusal (exit 1, error naming the flag) unless `--unsafe-listen` is
+also passed. When it is, marquee starts but prints a persistent,
+unmissable banner at startup warning that the proxy and dev app are now
+exposed to the network. That banner goes straight to stderr, never
+through the info logger, so `--quiet` cannot suppress it. Use it only on
+a trusted network, and never as a substitute for a real reverse proxy
+with auth.
+
+- Code: `loopbackHost`, `validateListen`, `printUnsafeListenWarning` in
+  `cmd/marquee/{main.go,options.go}`
+- Tests: `TestLoopbackHost` in `cmd/marquee/main_test.go`;
+  `TestValidateListenLoopback`,
+  `TestValidateListenNonLoopbackRefusedWithoutFlag`,
+  `TestValidateListenNonLoopbackAllowedWithFlag`,
+  `TestValidateListenInvalidAddress`, `TestUnsafeListenWarningIsLoud` in
+  `cmd/marquee/options_test.go`
 
 ### Guarded internal mux (`/__marquee/`)
 
@@ -26,17 +41,27 @@ request, before any handler runs:
 - **Host allowlist** (DNS-rebinding defense): the request `Host` (port
   stripped, case-insensitive) must be `localhost`, `127.0.0.1`, `::1`,
   `*.localhost`, `*.lvh.me`, or an operator-supplied extra. Anything
-  else gets a 403.
+  else gets a 403. Extras come from the repeatable `--allow-host` flag,
+  which appends exact-match hosts to the allowlist for operators whose
+  local dev domain is not covered by the built-ins. It only widens
+  which `Host` values reach the read-only `/__marquee/*` endpoints; it
+  never affects proxied app traffic (whose `Host` is untouched anyway)
+  and grants no new capabilities.
 - **`Cache-Control: no-store`** on every response.
 
 There is no way to register an internal endpoint outside the guard: the
 underlying `http.ServeMux` is unexported and only reachable via
 `InternalMux.Handle`/`HandleFunc`.
 
-- Code: `internal/proxy/internal.go`
-- Tests: `TestInternalHostGuard`, `TestInternalNamespaceNeverProxied`,
+- Code: `internal/proxy/internal.go`; the `--allow-host` flag is parsed
+  in `cmd/marquee/options.go` and passed to `proxy.Config.AllowHosts`
+  in `cmd/marquee/main.go`
+- Tests: `TestInternalHostGuard` (allowlist mechanism, including an
+  operator extra), `TestInternalNamespaceNeverProxied`,
   `TestInternalMuxRegistrationGoesThroughGuard` in
-  `internal/proxy/proxy_test.go`
+  `internal/proxy/proxy_test.go`; `TestAllowHostFlagReachesGuard` and
+  `TestParseArgsAllowHostRepeatable` in `cmd/marquee/` prove the flag
+  reaches the guard end to end
 
 Note the deliberate asymmetry: proxied app traffic keeps its `Host`
 untouched (multi-tenant subdomain routing needs it); only marquee's own
@@ -136,8 +161,6 @@ so the toolchain is kept small and continuously scanned.
 
 ## Not yet implemented
 
-- `--unsafe-listen` escape hatch (non-loopback listening stays a hard
-  refusal until then).
 - Same-origin + token guards for process-state-changing endpoints
   (none exists yet; the switch endpoint lands in v2). The bar toggle
   above deliberately opts out of these — see its section for why.

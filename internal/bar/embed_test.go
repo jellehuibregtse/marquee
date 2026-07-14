@@ -21,6 +21,8 @@ func TestBarScriptEmbedded(t *testing.T) {
 		`role="status"`,
 		"/__marquee/status",
 		`rel="noreferrer"`,
+		"status.position",
+		`:host([position="top"])`,
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("bar.js missing expected marker %q", marker)

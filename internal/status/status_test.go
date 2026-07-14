@@ -59,6 +59,7 @@ func fixtureDeps(t *testing.T, pr func() *ghinfo.PR) (status.Deps, string) {
 		Git:        poller.Snapshot,
 		PR:         pr,
 		ChildState: func() string { return "running" },
+		Position:   "bottom",
 	}, dir
 }
 
@@ -121,9 +122,13 @@ func TestStatusJSONShape(t *testing.T) {
 	}
 
 	doc := assertKeys(t, "status", rec.Body.Bytes(),
-		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child")
+		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position")
 	assertKeys(t, "worktree", doc["worktree"], "path", "slug", "isMain")
 	assertKeys(t, "child", doc["child"], "state")
+
+	if string(doc["position"]) != `"bottom"` {
+		t.Errorf("position = %s, want \"bottom\"", doc["position"])
+	}
 
 	if string(doc["branch"]) != `"trunk"` {
 		t.Errorf("branch = %s, want \"trunk\"", doc["branch"])
@@ -164,11 +169,29 @@ func TestStatusIncludesPR(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	doc := assertKeys(t, "status", rec.Body.Bytes(),
-		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child")
+		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position")
 	assertKeys(t, "pr", doc["pr"], "number", "title", "url")
 	var got ghinfo.PR
 	if err := json.Unmarshal(doc["pr"], &got); err != nil || got != *pr {
 		t.Errorf("pr = %s, want %+v", doc["pr"], *pr)
+	}
+}
+
+func TestStatusReportsPosition(t *testing.T) {
+	deps, _ := fixtureDeps(t, func() *ghinfo.PR { return nil })
+	deps.Position = "top"
+	mux := newMux(t, deps)
+
+	rec := get(mux, "http://localhost/__marquee/status")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if string(doc["position"]) != `"top"` {
+		t.Errorf("position = %s, want \"top\"", doc["position"])
 	}
 }
 

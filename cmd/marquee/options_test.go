@@ -137,6 +137,32 @@ func TestUnsafeListenWarningIsLoud(t *testing.T) {
 	}
 }
 
+// TestUnsafeBannerNotSuppressibleByQuiet is the abuse assertion for the
+// escape hatch: --quiet must never be able to silence the network-exposure
+// banner. The banner is written straight to its io.Writer, never routed
+// through the logger, so a --quiet logger (which swallows every Info line)
+// has no path to suppress it. The test proves both halves in one buffer: the
+// quiet logger's Info leaves nothing, then each banner still lands.
+func TestUnsafeBannerNotSuppressibleByQuiet(t *testing.T) {
+	var buf bytes.Buffer
+	log := newLogger(&buf, true)
+	log.Info("listening on %s", "0.0.0.0:3000")
+	if buf.Len() != 0 {
+		t.Fatalf("quiet logger emitted an info line: %q", buf.String())
+	}
+
+	printUnsafeListenWarning(&buf, "0.0.0.0:3000")
+	if !strings.Contains(buf.String(), "0.0.0.0:3000") {
+		t.Errorf("--quiet suppressed the listen banner: %q", buf.String())
+	}
+
+	buf.Reset()
+	printUnsafeUpstreamWarning(&buf, "http://192.168.1.5:3100")
+	if !strings.Contains(buf.String(), "192.168.1.5:3100") {
+		t.Errorf("--quiet suppressed the upstream banner: %q", buf.String())
+	}
+}
+
 func TestBrowserURL(t *testing.T) {
 	cases := map[string]string{
 		"127.0.0.1:3000": "http://127.0.0.1:3000",

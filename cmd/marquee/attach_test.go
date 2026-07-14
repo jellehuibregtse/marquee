@@ -107,9 +107,18 @@ func TestValidateUpstreamLoopback(t *testing.T) {
 // TestValidateUpstreamNonLoopbackRefused is the abuse test: a non-loopback
 // upstream must be refused and the refusal must take no network action.
 // validateUpstream only inspects the host string (loopbackHost), so a
-// remote host is rejected without ever dialing it.
+// remote host is rejected without ever dialing it. The lookalike cases pin
+// the tricks a naive check would fall for: userinfo that makes a remote host
+// read as loopback (127.0.0.1@evil.com — Hostname() is evil.com, not
+// 127.0.0.1), the decimal form of 127.0.0.1 (2130706433, which the OS
+// resolver would dial as loopback but marquee refuses because it is not a
+// canonical loopback literal), and a localhost-prefixed suffix domain.
 func TestValidateUpstreamNonLoopbackRefused(t *testing.T) {
-	for _, raw := range []string{"http://192.168.1.5:3100", "http://example.test:3100", "http://10.0.0.1"} {
+	for _, raw := range []string{
+		"http://192.168.1.5:3100", "http://example.test:3100", "http://10.0.0.1",
+		"http://127.0.0.1@evil.com", "http://localhost@evil.com",
+		"http://2130706433:3100", "http://localhost.evil.com:3100",
+	} {
 		_, err := validateUpstream(mustParseURL(t, raw), false)
 		if err == nil {
 			t.Errorf("validateUpstream(%q, false) accepted a non-loopback upstream", raw)

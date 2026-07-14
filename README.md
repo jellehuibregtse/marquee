@@ -22,8 +22,10 @@ marquee -- bin/dev
 Attach mode — pure proxy in front of a server you manage yourself:
 
 ```sh
-marquee attach --listen 4000 --upstream http://localhost:3000
+marquee attach --listen 127.0.0.1:4000 --upstream http://localhost:3000
 ```
+
+Both `--listen` and `--upstream` must be loopback; a non-loopback value is refused unless you pass `--unsafe-listen` (which prints a persistent network-exposure warning). `--upstream` is required and must be an `http`/`https` URL.
 
 ## Disabling the bar (CI / screenshots / automation)
 

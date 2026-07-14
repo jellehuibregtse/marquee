@@ -475,6 +475,64 @@ func TestProxiesOnceUpstreamBecomesReady(t *testing.T) {
 	}
 }
 
+// TestConfigUpstreamURLOverridesInternalPort proves attach mode's explicit
+// upstream wins: InternalPort points at a dead port, but UpstreamURL points
+// at the live upstream, so requests are proxied there.
+func TestConfigUpstreamURLOverridesInternalPort(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "explicit-upstream")
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{InternalPort: freePort(t), UpstreamURL: upstreamURL, Logger: log.New(io.Discard, "", 0)}
+	cfg.ProbeTimeout = 100 * time.Millisecond
+	cfg.ProbeTTL = time.Millisecond
+	proxySrv := httptest.NewServer(New(cfg))
+	defer proxySrv.Close()
+
+	resp, err := http.Get(proxySrv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || string(body) != "explicit-upstream" {
+		t.Fatalf("status = %d body = %q, want 200 explicit-upstream (UpstreamURL should win over InternalPort)", resp.StatusCode, body)
+	}
+}
+
+// TestConfigDefaultsToInternalPort is the wrapper-mode regression guard:
+// with UpstreamURL nil, the target is 127.0.0.1:InternalPort, unchanged.
+func TestConfigDefaultsToInternalPort(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "internal-port")
+	}))
+	defer upstream.Close()
+
+	proxySrv := httptest.NewServer(newHandler(t, upstreamPort(t, upstream), Config{}))
+	defer proxySrv.Close()
+
+	resp, err := http.Get(proxySrv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || string(body) != "internal-port" {
+		t.Fatalf("status = %d body = %q, want 200 internal-port", resp.StatusCode, body)
+	}
+}
+
 func TestUpstreamDiesMidRunServesStartingPage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "alive")

@@ -23,6 +23,12 @@ const internalPrefix = "/__marquee/"
 // upstream (child) server listens on.
 type Config struct {
 	InternalPort int
+	// UpstreamURL, when non-nil, is the explicit upstream marquee proxies
+	// to (attach mode, where marquee manages no child). It overrides
+	// InternalPort for both the reverse-proxy target and the liveness
+	// probe. When nil, the upstream falls back to 127.0.0.1:InternalPort
+	// (wrapper mode).
+	UpstreamURL *url.URL
 	// AllowHosts are extra Host values (exact match, port ignored)
 	// accepted on /__marquee/* in addition to the built-in loopback
 	// allowlist.
@@ -54,8 +60,12 @@ func New(cfg Config) *Handler {
 	if logger == nil {
 		logger = log.Default()
 	}
-	upstream := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.InternalPort))
-	target := &url.URL{Scheme: "http", Host: upstream}
+	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.InternalPort))}
+	probeAddr := target.Host
+	if cfg.UpstreamURL != nil {
+		target = cfg.UpstreamURL
+		probeAddr = upstreamProbeAddr(cfg.UpstreamURL)
+	}
 	// Read once at startup; injection decisions never consult the
 	// environment at request time.
 	switches := newBarSwitches(os.Getenv("MARQUEE_DISABLE_BAR") == "1")
@@ -63,7 +73,7 @@ func New(cfg Config) *Handler {
 	h := &Handler{
 		internal: NewInternalMux(cfg.AllowHosts...),
 		probe: &probe{
-			addr:    upstream,
+			addr:    probeAddr,
 			timeout: defaultDuration(cfg.ProbeTimeout, 250*time.Millisecond),
 			ttl:     defaultDuration(cfg.ProbeTTL, 500*time.Millisecond),
 		},
@@ -117,6 +127,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func isInternalPath(path string) bool {
 	return path == internalPrefix[:len(internalPrefix)-1] || strings.HasPrefix(path, internalPrefix)
+}
+
+// upstreamProbeAddr turns an upstream URL into a host:port the liveness
+// probe can dial, filling in the scheme's default port when the URL omits
+// one so net.DialTimeout always has a port.
+func upstreamProbeAddr(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(u.Hostname(), port)
 }
 
 func defaultDuration(d, fallback time.Duration) time.Duration {

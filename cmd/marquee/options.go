@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -52,6 +53,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.BoolVar(&opts.showVersion, "version", false, "print version and exit")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintln(out, "usage: marquee [flags] -- command [args...]")
+		_, _ = fmt.Fprintln(out, "       marquee attach --upstream <url> [flags]   (proxy a server you run yourself)")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -68,6 +70,101 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 		return nil, errUsage
 	}
 	return opts, nil
+}
+
+// attachOptions holds the flags for the attach subcommand: a pure proxy
+// in front of a server the user runs themselves. There is no child, so no
+// --internal-port; --upstream names the server to proxy to instead.
+type attachOptions struct {
+	listen       string
+	upstream     string
+	upstreamURL  *url.URL
+	position     string
+	noOpen       bool
+	quiet        bool
+	allowHosts   []string
+	unsafeListen bool
+}
+
+func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions, error) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(out)
+	opts := &attachOptions{}
+	fs.StringVar(&opts.listen, "listen", "127.0.0.1:3000", "address to listen on (loopback only unless --unsafe-listen)")
+	fs.StringVar(&opts.upstream, "upstream", "", "upstream URL to proxy to, e.g. http://localhost:3100 (required, loopback only unless --unsafe-listen)")
+	fs.StringVar(&opts.position, "position", "bottom", "where the bar renders: top or bottom")
+	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the upstream is healthy")
+	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
+	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints (repeatable)")
+	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen and --upstream, exposing the proxy to the network")
+	fs.Usage = func() {
+		_, _ = fmt.Fprintln(out, "usage: marquee attach --upstream <url> [flags]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if positional := fs.Args(); len(positional) > 0 {
+		_, _ = fmt.Fprintf(out, "marquee: attach takes no positional arguments (got %v); did you mean --upstream?\n", positional)
+		return nil, errUsage
+	}
+	if opts.position != "top" && opts.position != "bottom" {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be top or bottom\n", opts.position)
+		return nil, errUsage
+	}
+	u, err := parseUpstream(opts.upstream)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "marquee: %v\n", err)
+		return nil, errUsage
+	}
+	opts.upstreamURL = u
+	return opts, nil
+}
+
+// parseUpstream validates --upstream as a shape (present, parseable,
+// http(s), has a host). Whether that host is loopback is a separate
+// security check (validateUpstream) so it can carry its own exit code.
+func parseUpstream(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, fmt.Errorf("--upstream is required (e.g. http://localhost:3100)")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --upstream %q: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("invalid --upstream %q: scheme must be http or https", raw)
+	}
+	if u.Hostname() == "" {
+		return nil, fmt.Errorf("invalid --upstream %q: missing host", raw)
+	}
+	return u, nil
+}
+
+// validateUpstream is the upstream twin of validateListen: a loopback
+// upstream is always fine; a non-loopback one is refused unless unsafe is
+// set, in which case it is allowed and unsafeAllowed is true so the caller
+// can print the network-exposure warning. marquee is a localhost-only dev
+// tool, so proxying to a remote host is refused by default.
+func validateUpstream(u *url.URL, unsafe bool) (unsafeAllowed bool, err error) {
+	if loopbackHost(u.Hostname()) {
+		return false, nil
+	}
+	if !unsafe {
+		return false, fmt.Errorf("refusing to proxy to non-loopback upstream %q — marquee only proxies to a server on your own machine; pass --unsafe-listen if you really mean to", u.Redacted())
+	}
+	return true, nil
+}
+
+// printUnsafeUpstreamWarning is the upstream twin of
+// printUnsafeListenWarning: a persistent stderr banner, never routed
+// through the logger, so --quiet cannot suppress it.
+func printUnsafeUpstreamWarning(w io.Writer, upstream string) {
+	const rule = "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+	_, _ = fmt.Fprintf(w, "%s\n", rule)
+	_, _ = fmt.Fprintf(w, "marquee: UNSAFE: proxying to non-loopback upstream %s\n", upstream)
+	_, _ = fmt.Fprintf(w, "marquee: marquee is a localhost-only dev tool; sending traffic to a remote host is not what it is for.\n")
+	_, _ = fmt.Fprintf(w, "%s\n", rule)
 }
 
 // validateListen enforces the loopback-only default and its escape hatch.

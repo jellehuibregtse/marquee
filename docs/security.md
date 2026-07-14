@@ -32,6 +32,39 @@ with auth.
   `TestValidateListenInvalidAddress`, `TestUnsafeListenWarningIsLoud` in
   `cmd/marquee/options_test.go`
 
+#### Loopback-only upstream (attach mode)
+
+`marquee attach --listen <addr> --upstream <url>` is a pure proxy in
+front of a server the user runs themselves (no child process). Its
+`--listen` obeys the same loopback-only rule as wrapper mode, and its
+`--upstream` gets the symmetric guard: marquee refuses to proxy to a
+non-loopback upstream (exit 1, error naming the flag), because it is a
+localhost-only dev tool and has no business forwarding a browser's
+traffic to a remote host. The escape hatch is the same `--unsafe-listen`
+flag — passing it allows a non-loopback upstream (or listener) and
+prints a persistent, unmissable stderr banner that `--quiet` cannot
+suppress. A missing, empty, unparseable, or non-`http(s)` `--upstream`
+is a usage error (exit 2) before any network action is taken.
+
+The upstream check inspects only the host string (`loopbackHost`); a
+non-loopback upstream is rejected without ever dialing it, so a refusal
+performs no network action.
+
+- Code: `runAttach`, `parseAttachArgs`, `parseUpstream`,
+  `validateUpstream`, `printUnsafeUpstreamWarning` in
+  `cmd/marquee/{attach.go,options.go}`; the explicit upstream flows into
+  `proxy.Config.UpstreamURL` (`internal/proxy/proxy.go`), which drives
+  both the reverse-proxy target and the liveness probe
+- Tests: `TestValidateUpstreamLoopback`,
+  `TestValidateUpstreamNonLoopbackRefused` (the abuse test: refused with
+  no network action), `TestValidateUpstreamNonLoopbackAllowedWithFlag`,
+  `TestUnsafeUpstreamWarningIsLoud`, `TestParseAttachArgsUpstreamRequired`,
+  `TestParseAttachArgsBadScheme`, `TestAttachProxiesAndInjects` in
+  `cmd/marquee/attach_test.go`;
+  `TestConfigUpstreamURLOverridesInternalPort`,
+  `TestConfigDefaultsToInternalPort` (wrapper-mode regression guard) in
+  `internal/proxy/proxy_test.go`
+
 ### Guarded internal mux (`/__marquee/`)
 
 The `/__marquee/` namespace is never proxied to the upstream. All

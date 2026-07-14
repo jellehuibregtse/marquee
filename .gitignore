@@ -4,3 +4,6 @@ cmd/marquee/marquee
 *.exe
 .DS_Store
 .claude/
+
+# IDE
+.idea/

@@ -287,42 +287,64 @@ func TestInternalHostGuard(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer upstream.Close()
 
-	proxySrv := httptest.NewServer(newHandler(t, upstreamPort(t, upstream), Config{AllowHosts: []string{"myapp.test"}}))
-	defer proxySrv.Close()
+	upstreamP := upstreamPort(t, upstream)
 
-	tests := []struct {
-		host string
-		want int
+	cases := []struct {
+		name       string
+		allowHosts []string
+		host       string
+		want       int
 	}{
-		{"evil.com", http.StatusForbidden},
-		{"evil.com:3000", http.StatusForbidden},
-		{"localhost.evil.com", http.StatusForbidden},
-		{"lvh.me.evil.com", http.StatusForbidden},
-		{"localhost", http.StatusNotFound},
-		{"localhost:3000", http.StatusNotFound},
-		{"127.0.0.1:3000", http.StatusNotFound},
-		{"[::1]:3000", http.StatusNotFound},
-		{"app.localhost", http.StatusNotFound},
-		{"app.lvh.me:3000", http.StatusNotFound},
-		{"MyApp.Test:8080", http.StatusNotFound},
+		{"reject arbitrary host", nil, "evil.com", http.StatusForbidden},
+		{"reject arbitrary host with port", nil, "evil.com:3000", http.StatusForbidden},
+		{"reject localhost lookalike", nil, "localhost.evil.com", http.StatusForbidden},
+		{"reject lvh.me lookalike", nil, "lvh.me.evil.com", http.StatusForbidden},
+		{"allow localhost", nil, "localhost", http.StatusNotFound},
+		{"allow localhost with port", nil, "localhost:3000", http.StatusNotFound},
+		{"allow loopback ipv4", nil, "127.0.0.1:3000", http.StatusNotFound},
+		{"allow loopback ipv6", nil, "[::1]:3000", http.StatusNotFound},
+		{"allow localhost subdomain", nil, "app.localhost", http.StatusNotFound},
+
+		// lvh.me is no longer trusted by default: it is a third-party
+		// public wildcard DNS domain, so the operator must opt in.
+		{"reject lvh.me subdomain by default", nil, "app.lvh.me:3000", http.StatusForbidden},
+		{"reject bare lvh.me by default", nil, "lvh.me", http.StatusForbidden},
+
+		{"exact extra host allowed", []string{"myapp.test"}, "MyApp.Test:8080", http.StatusNotFound},
+		{"exact extra host mismatch rejected", []string{"myapp.test"}, "other.test", http.StatusForbidden},
+
+		// Opting lvh.me back in via a wildcard, anchored on a dot
+		// boundary so lookalikes are still rejected.
+		{"wildcard allows subdomain", []string{"*.lvh.me"}, "app.lvh.me", http.StatusNotFound},
+		{"wildcard allows subdomain with port", []string{"*.lvh.me"}, "x.lvh.me:3000", http.StatusNotFound},
+		{"wildcard rejects bare apex", []string{"*.lvh.me"}, "lvh.me", http.StatusForbidden},
+		{"wildcard rejects prefix lookalike", []string{"*.lvh.me"}, "evil-lvh.me", http.StatusForbidden},
+		{"wildcard rejects suffix lookalike", []string{"*.lvh.me"}, "lvh.me.evil.com", http.StatusForbidden},
+		{"wildcard rejects bare suffix host", []string{"*.lvh.me"}, ".lvh.me", http.StatusForbidden},
+		{"dot wildcard allows subdomain", []string{".lvh.me"}, "app.lvh.me", http.StatusNotFound},
 	}
-	for _, tc := range tests {
-		req, err := http.NewRequest(http.MethodGet, proxySrv.URL+"/__marquee/status", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		req.Host = tc.host
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != tc.want {
-			t.Errorf("Host %q: status = %d, want %d", tc.host, resp.StatusCode, tc.want)
-		}
-		if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
-			t.Errorf("Host %q: Cache-Control = %q, want %q", tc.host, cc, "no-store")
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proxySrv := httptest.NewServer(newHandler(t, upstreamP, Config{AllowHosts: tc.allowHosts}))
+			defer proxySrv.Close()
+
+			req, err := http.NewRequest(http.MethodGet, proxySrv.URL+"/__marquee/status", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Host = tc.host
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("Host %q: status = %d, want %d", tc.host, resp.StatusCode, tc.want)
+			}
+			if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+				t.Errorf("Host %q: Cache-Control = %q, want %q", tc.host, cc, "no-store")
+			}
+		})
 	}
 
 	if NewInternalMux().hostAllowed("") {

@@ -73,13 +73,26 @@ request, before any handler runs:
 
 - **Host allowlist** (DNS-rebinding defense): the request `Host` (port
   stripped, case-insensitive) must be `localhost`, `127.0.0.1`, `::1`,
-  `*.localhost`, `*.lvh.me`, or an operator-supplied extra. Anything
-  else gets a 403. Extras come from the repeatable `--allow-host` flag,
-  which appends exact-match hosts to the allowlist for operators whose
-  local dev domain is not covered by the built-ins. It only widens
-  which `Host` values reach the read-only `/__marquee/*` endpoints; it
-  never affects proxied app traffic (whose `Host` is untouched anyway)
-  and grants no new capabilities.
+  `*.localhost`, or an operator-supplied extra. Anything else gets a
+  403. `*.localhost` is built in because RFC 6761 reserves `.localhost`
+  for loopback — it can never be registered by a third party, so
+  trusting it by default is safe.
+
+  `*.lvh.me` is **not** trusted by default. `lvh.me` is a third-party
+  public wildcard domain (every subdomain resolves to `127.0.0.1`);
+  trusting it by default would outsource the rebinding trust boundary
+  to an external operator, so operators who rely on it must opt in
+  explicitly with `--allow-host '*.lvh.me'`.
+
+  Extras come from the repeatable `--allow-host` flag. Each value is
+  either an exact host (e.g. `myapp.test`) or a `*.<suffix>` wildcard
+  (e.g. `*.lvh.me`, also accepted as `.lvh.me`). A wildcard matches any
+  subdomain, anchored on a dot boundary: `*.lvh.me` matches
+  `app.lvh.me` but neither the bare apex `lvh.me` nor lookalikes
+  like `evil-lvh.me` or `lvh.me.evil.com`. The flag only widens which
+  `Host` values reach the read-only `/__marquee/*` endpoints; it never
+  affects proxied app traffic (whose `Host` is untouched anyway) and
+  grants no new capabilities.
 - **`Cache-Control: no-store`** on every response.
 
 There is no way to register an internal endpoint outside the guard: the

@@ -48,7 +48,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.StringVar(&opts.position, "position", "bottom", "where the bar renders: top or bottom")
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the app is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
-	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints (repeatable)")
+	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen, exposing the proxy to the network")
 	fs.BoolVar(&opts.showVersion, "version", false, "print version and exit")
 	fs.Usage = func() {
@@ -95,7 +95,7 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 	fs.StringVar(&opts.position, "position", "bottom", "where the bar renders: top or bottom")
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the upstream is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
-	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints (repeatable)")
+	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen and --upstream, exposing the proxy to the network")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintln(out, "usage: marquee attach --upstream <url> [flags]")

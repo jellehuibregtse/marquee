@@ -16,7 +16,7 @@ import (
 // Host allowlist, while a host that is neither built-in nor supplied
 // still gets a 403.
 func TestAllowHostFlagReachesGuard(t *testing.T) {
-	opts, err := parseArgs("marquee", []string{"--allow-host", "myapp.test", "--", "bin/dev"}, io.Discard)
+	opts, err := parseArgs("marquee", []string{"--allow-host", "myapp.test", "--allow-host", "*.lvh.me", "--", "bin/dev"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
 	}
@@ -31,6 +31,9 @@ func TestAllowHostFlagReachesGuard(t *testing.T) {
 	cases := map[string]int{
 		"myapp.test":     http.StatusOK,
 		"myapp.test:456": http.StatusOK,
+		"app.lvh.me":     http.StatusOK,
+		"lvh.me":         http.StatusForbidden,
+		"evil-lvh.me":    http.StatusForbidden,
 		"evil.com":       http.StatusForbidden,
 	}
 	for host, want := range cases {

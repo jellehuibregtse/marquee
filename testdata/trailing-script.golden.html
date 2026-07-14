@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Fixture: trailing script with a body closer in a string</title>
+</head>
+<body>
+<h1>Synthetic fixture page</h1>
+<p>An analytics script follows the document, and its string literal mentions the closing tags.</p>
+<script type="module" src="/__marquee/bar.js"></script><marquee-bar></marquee-bar></body>
+</html>
+<script>
+  const marker = "prefix </body></html> suffix";
+  console.log("this string must not attract the splice", marker);
+</script>

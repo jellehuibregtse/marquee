@@ -166,6 +166,36 @@ upstream (the app never sees marquee plumbing —
 `MARQUEE_DISABLE_BAR` environment variable is read once at startup,
 never at request time.
 
+### Bar injection anchors at the true document close
+
+The bar snippet is spliced by byte position only — no HTML parsing, no
+evaluation — and the anchor is chosen conservatively so a hostile or
+merely unusual upstream cannot make the splice land in the wrong place.
+The injector splices immediately before the document's structural
+`</body>`: the last `</body>` that lies in ordinary markup. A `</body>`
+that appears only inside a `<script>` element (e.g. a trailing analytics
+script whose string literal contains `</body>`) or inside an HTML
+comment (e.g. a trailing deploy marker) is not the document end, so it
+is skipped rather than spliced into — which would otherwise corrupt the
+page or silently drop the bar. The scan is a single forward pass, not a
+full HTML tokenizer: when a script's own content opens another `<script>`
+(HTML's double-escaped state, where the first `</script>` does not close
+the element and our region end would diverge from the browser's), the
+injector falls open at the last known-good close rather than risk
+anchoring inside a still-open script. If no `</body>` qualifies, it
+delivers the original bytes untouched, with the upstream `Content-Length`
+unchanged. This is not a privilege boundary — the snippet is a fixed
+same-origin constant, so a hostile upstream cannot inject attacker script
+through it — but it upholds the fail-open law on legitimate-but-unusual
+pages.
+
+- Code: `structuralBodyClose` in `internal/proxy/inject.go`
+- Tests: `TestStructuralBodyClose` (region logic, including unterminated
+  script/comment and the `</body>`-inside-a-string cases) and the
+  `trailing script`, `trailing comment`, `textarea`, and
+  `only closer inside script` cases in `TestInjectionGoldenFiles`
+  (`internal/proxy/inject_test.go`)
+
 ### Fail-open upstream errors
 
 Upstream connection failures never surface as raw errors: browser

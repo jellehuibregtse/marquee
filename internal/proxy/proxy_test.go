@@ -297,7 +297,8 @@ func TestInternalHostGuard(t *testing.T) {
 	}{
 		{"reject arbitrary host", nil, "evil.com", http.StatusForbidden},
 		{"reject arbitrary host with port", nil, "evil.com:3000", http.StatusForbidden},
-		{"reject localhost lookalike", nil, "localhost.evil.com", http.StatusForbidden},
+		{"reject localhost suffix lookalike", nil, "localhost.evil.com", http.StatusForbidden},
+		{"reject localhost prefix lookalike", nil, "evil-localhost.com", http.StatusForbidden},
 		{"reject lvh.me lookalike", nil, "lvh.me.evil.com", http.StatusForbidden},
 		{"allow localhost", nil, "localhost", http.StatusNotFound},
 		{"allow localhost with port", nil, "localhost:3000", http.StatusNotFound},

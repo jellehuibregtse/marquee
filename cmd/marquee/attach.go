@@ -68,7 +68,7 @@ func runAttach(args []string) int {
 	gh := ghinfo.New(workdir)
 	defer gh.Stop()
 
-	handler := proxy.New(proxy.Config{UpstreamURL: opts.upstreamURL, AllowHosts: opts.allowHosts})
+	handler := proxy.New(proxy.Config{UpstreamURL: opts.upstreamURL, AllowHosts: opts.allowHosts, RelaxCSP: !opts.keepCSP})
 	status.Register(handler.Internal(), status.Deps{
 		Git:        git.Snapshot,
 		PR:         gh.PR,

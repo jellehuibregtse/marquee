@@ -143,7 +143,7 @@ marquee injects the bar only when **all** of these hold for a response:
 
 Framed documents are also skipped (one bar per page, not one per iframe), and the bar script refuses to render when it isn't the top-level window.
 
-If your app sends a Content-Security-Policy that blocks inline module scripts, the injected `<script>` won't run. Dev-mode CSPs are rare, so this is uncommon in practice.
+If your app sends a **Content-Security-Policy**, the bar needs `'self'` allowed for its own script (`/__marquee/bar.js`) and fetch (`/__marquee/status`). By default marquee handles this for you: whenever it injects the bar, it rewrites that response's enforcing CSP to add `'self'` to the script- and connect-governing directives, and nothing else — report-only CSP and every other directive are left untouched, and only same-origin `'self'` is ever granted (never a third party). Pass `--keep-csp` to leave your app's CSP exactly as it sent it. Relaxation only rewrites the response **header**, so a CSP delivered inside the page via a `<meta http-equiv="Content-Security-Policy">` tag, or a CSP on a route marquee doesn't inject into, can still keep the bar from loading. See [docs/security.md](docs/security.md) for exactly what changes.
 
 ### Does it change my app's responses?
 

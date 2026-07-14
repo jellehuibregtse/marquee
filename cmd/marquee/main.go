@@ -110,7 +110,7 @@ func run() int {
 	gh := ghinfo.New(workdir)
 	defer gh.Stop()
 
-	handler := proxy.New(proxy.Config{InternalPort: port, AllowHosts: opts.allowHosts})
+	handler := proxy.New(proxy.Config{InternalPort: port, AllowHosts: opts.allowHosts, RelaxCSP: !opts.keepCSP})
 	status.Register(handler.Internal(), status.Deps{
 		Git:        git.Snapshot,
 		PR:         gh.PR,

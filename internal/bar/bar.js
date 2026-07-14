@@ -154,6 +154,15 @@ function branchColors(branch, dark) {
   };
 }
 
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(value, location.href);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 class MarqueeBar extends HTMLElement {
   #wrap;
   #bar;
@@ -239,10 +248,11 @@ class MarqueeBar extends HTMLElement {
     this.#worktree.hidden = !showWorktree;
     if (showWorktree) this.#worktree.textContent = worktree.slug;
     const pr = status.pr;
-    const showPr = Boolean(pr && pr.url);
+    const prHref = pr && pr.url ? safeHttpUrl(pr.url) : null;
+    const showPr = prHref !== null;
     this.#pr.hidden = !showPr;
     if (showPr) {
-      this.#pr.href = pr.url;
+      this.#pr.href = prHref;
       this.#pr.textContent = `#${pr.number} ${pr.title}`;
     }
     this.#toggle.style.background = this.#collapsed ? colors.background : "";

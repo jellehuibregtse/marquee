@@ -196,6 +196,25 @@ pages.
   `only closer inside script` cases in `TestInjectionGoldenFiles`
   (`internal/proxy/inject_test.go`)
 
+### Bar renders only `http(s):` PR links
+
+The injected bar turns the status payload's PR URL into a clickable
+anchor. That URL originates from `gh pr view` inside marquee's own
+process — `git`/`gh` output, isolated from web and upstream input — and
+`gh` yields a canonical `https://github.com/...`, so it is not
+attacker-controllable today. The bar validates it anyway, as
+defense-in-depth: `safeHttpUrl` parses the value with the URL API and
+returns it only when the protocol is `http:` or `https:`. A
+`javascript:` or `data:` URL (which would otherwise execute in the
+app's top-level origin when clicked) fails the check, so the PR chip is
+hidden rather than rendered as a dead or dangerous link. The chip text
+(`#<number> <title>`) is written through `textContent`, never
+`innerHTML`.
+
+- Code: `safeHttpUrl` in `internal/bar/bar.js`
+- Tests: `TestBarScriptEmbedded` in `internal/bar/embed_test.go` pins
+  the guard so it cannot be silently removed
+
 ### Fail-open upstream errors
 
 Upstream connection failures never surface as raw errors: browser

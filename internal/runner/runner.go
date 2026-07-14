@@ -73,6 +73,7 @@ func (r *Runner) Start() error {
 	if r.state == StateRunning {
 		return errors.New("runner: already running")
 	}
+	// #nosec G204 -- argv is the command the operator passed on marquee's own command line; running it is the tool's core purpose and it is never influenced by HTTP input.
 	cmd := exec.Command(r.argv[0], r.argv[1:]...)
 	cmd.Dir = r.dir
 	cmd.Env = append(os.Environ(), r.extraEnv...)

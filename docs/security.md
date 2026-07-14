@@ -105,6 +105,35 @@ a plain 503. No stack traces, no internal details in responses.
 - Tests: `TestStartingPageWhileUpstreamNotReady`,
   `TestUpstreamDiesMidRunServesStartingPage`
 
+## Supply chain
+
+The binary people install must be what CI built from reviewed source,
+so the toolchain is kept small and continuously scanned.
+
+- **Zero runtime dependencies.** `go.mod` requires nothing beyond the
+  standard library, which keeps the dependency attack surface at zero.
+- **`govulncheck` in CI.** Every push and pull request runs
+  `govulncheck ./...` (pinned to `v1.6.0`) against the standard library
+  and any future dependency, failing the build on a known, reachable
+  vulnerability.
+- **`gosec` in CI.** The `gosec` security linter runs as part of
+  `golangci-lint` (config: `.golangci.yml`, alongside `errorlint`);
+  golangci-lint is pinned to `v2.12.2` in the workflow. Findings are
+  triaged, not blanket-ignored: real issues are fixed and the few
+  false positives carry a narrowly-scoped `#nosec` with a justification
+  naming why the input cannot come from HTTP (the subprocess launches in
+  `runner`, `gitinfo`, `ghinfo`, and the startup port diagnostics all
+  run fixed or operator-supplied argv, never request data).
+- **Actions pinned by commit SHA.** Every `uses:` in
+  `.github/workflows/` is pinned to a full commit SHA with a version
+  comment, so a moved tag cannot swap the action out from under us.
+- **Dependabot** (`.github/dependabot.yml`) watches the
+  `github-actions` and `gomod` ecosystems weekly and opens PRs to bump
+  pins, which then go through the same CI and human review.
+
+- Config: `.github/workflows/ci.yml`, `.golangci.yml`,
+  `.github/dependabot.yml`
+
 ## Not yet implemented
 
 - `--unsafe-listen` escape hatch (non-loopback listening stays a hard

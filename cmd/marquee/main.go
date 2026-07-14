@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"github.com/jellehuibregtse/marquee/internal/proxy"
 	"github.com/jellehuibregtse/marquee/internal/runner"
 	"github.com/jellehuibregtse/marquee/internal/status"
+	"github.com/jellehuibregtse/marquee/internal/switcher"
 )
 
 var (
@@ -110,13 +113,36 @@ func run() int {
 	gh := ghinfo.New(workdir)
 	defer gh.Stop()
 
-	handler := proxy.New(proxy.Config{InternalPort: port, AllowHosts: opts.allowHosts, RelaxCSP: !opts.keepCSP})
+	// The worktree switcher's CSRF token is minted once per process with
+	// crypto/rand. If minting fails we run without a token: the switch
+	// endpoint then rejects every request and the bar hides its switcher,
+	// while everything else keeps working (fail-open).
+	switchToken, err := mintToken()
+	if err != nil {
+		log.Warn("could not mint a switch token; the worktree switcher is disabled this run: %v", err)
+		switchToken = ""
+	}
+
+	handler := proxy.New(proxy.Config{InternalPort: port, AllowHosts: opts.allowHosts, RelaxCSP: !opts.keepCSP, SwitchToken: switchToken})
 	status.Register(handler.Internal(), status.Deps{
 		Git:        git.Snapshot,
 		PR:         gh.PR,
 		ChildState: func() string { return string(child.Status().State) },
 		Position:   opts.position,
 	})
+	if switchToken != "" {
+		healthAddr := fmt.Sprintf("127.0.0.1:%d", port)
+		sw := switcher.New(switcher.Config{
+			Token:   switchToken,
+			Runner:  child,
+			Collect: gitinfo.Collect,
+			Repoint: func(dir string) { git.Repoint(dir); gh.Repoint(dir) },
+			Health:  func(ctx context.Context) error { return runner.WaitTCP(ctx, healthAddr, 0) },
+			Dir:     workdir,
+		})
+		switcher.Register(handler.Internal(), sw)
+		handler.SetSwitchingProbe(sw.SwitchingSlug)
+	}
 
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	serveErr := make(chan error, 1)
@@ -197,6 +223,18 @@ func loopbackHost(host string) bool {
 		return ip.IsLoopback()
 	}
 	return false
+}
+
+// mintToken returns a fresh 256-bit random token, hex-encoded, for the
+// worktree switcher's CSRF guard. crypto/rand makes it unpredictable; hex
+// keeps it free of HTML-special characters so it embeds into the injected
+// snippet without escaping. It is generated once per process and never logged.
+func mintToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func freePort() (int, error) {

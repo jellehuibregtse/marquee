@@ -25,6 +25,16 @@ func TestBarScriptEmbedded(t *testing.T) {
 		`:host([position="top"])`,
 		"safeHttpUrl",
 		`url.protocol === "https:"`,
+		// Worktree switcher (M4-T2): the POST target, the token header echoed
+		// from the injected attribute, the accessible dropdown, and the
+		// dirty-refusal confirm path.
+		"/__marquee/switch",
+		"X-Marquee-Token",
+		`getAttribute("token")`,
+		`aria-haspopup="menu"`,
+		`role="menu"`,
+		"aria-expanded",
+		"textContent",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("bar.js missing expected marker %q", marker)

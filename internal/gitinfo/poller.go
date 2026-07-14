@@ -54,6 +54,18 @@ func (p *Poller) Snapshot() Snapshot {
 	return p.snap
 }
 
+// Repoint atomically swaps the directory the poller collects from and
+// refreshes immediately, so a caller (the worktree switcher) can point the
+// bar at a new worktree and have the very next status read reflect it. The
+// swap and the concurrent Snapshot reads are both guarded by the same mutex,
+// so a reader never observes a torn state.
+func (p *Poller) Repoint(dir string) {
+	p.mu.Lock()
+	p.dir = dir
+	p.mu.Unlock()
+	p.refresh()
+}
+
 // Stop halts the poll loop and waits for it to finish. Safe to call twice.
 func (p *Poller) Stop() {
 	p.stopOnce.Do(func() { close(p.stop) })
@@ -75,7 +87,10 @@ func (p *Poller) loop() {
 }
 
 func (p *Poller) refresh() {
-	snap, err := collect(p.dir)
+	p.mu.Lock()
+	dir := p.dir
+	p.mu.Unlock()
+	snap, err := collect(dir)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err != nil {

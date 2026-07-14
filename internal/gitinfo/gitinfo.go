@@ -35,6 +35,12 @@ type Snapshot struct {
 	Worktrees []Worktree      `json:"worktrees"`
 }
 
+// Collect gathers a fresh git Snapshot for dir by shelling out to git. It is
+// the same collection the poller caches, exposed so the worktree switcher can
+// validate a switch request against the live worktree set — parsed from git's
+// own `worktree list --porcelain` output — rather than a possibly-stale cache.
+func Collect(dir string) (Snapshot, error) { return collect(dir) }
+
 func collect(dir string) (Snapshot, error) {
 	branch, err := runGit(dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {

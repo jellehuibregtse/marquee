@@ -30,7 +30,12 @@ import (
 
 const (
 	fixtureBranch = "marquee-e2e-fixture"
-	barSnippet    = `<script type="module" src="/__marquee/bar.js"></script><marquee-bar></marquee-bar>`
+	// The real binary mints a per-process switch token, so the injected
+	// element carries a token attribute whose value varies per run. Assertions
+	// check the script tag and the element boundary rather than a fixed
+	// token-less snippet.
+	barScriptTag  = `<script type="module" src="/__marquee/bar.js"></script>`
+	barElementEnd = `</marquee-bar>`
 	wsGUID        = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 )
 
@@ -234,7 +239,7 @@ func TestBarInjectedBeforeFinalBodyClose(t *testing.T) {
 	if idx < 0 {
 		t.Fatalf("no </body> in response:\n%s", body)
 	}
-	if !bytes.HasSuffix(body[:idx], []byte(barSnippet)) {
+	if !bytes.HasSuffix(body[:idx], []byte(barElementEnd)) || !bytes.Contains(body[:idx], []byte(barScriptTag)) {
 		t.Fatalf("bar snippet not immediately before final </body>:\n%s", body)
 	}
 	if cl := resp.Header.Get("Content-Length"); cl != strconv.Itoa(len(body)) {
@@ -477,7 +482,7 @@ func TestStartingPageWhileChildBoots(t *testing.T) {
 	for {
 		resp, body = getHTML(t, proc.baseURL+"/")
 		if resp.StatusCode == http.StatusOK {
-			if !bytes.Contains(body, []byte(barSnippet)) {
+			if !bytes.Contains(body, []byte(barScriptTag)) || !bytes.Contains(body, []byte(barElementEnd)) {
 				t.Fatalf("bar snippet missing once upstream is up:\n%s", body)
 			}
 			return

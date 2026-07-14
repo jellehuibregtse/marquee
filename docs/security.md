@@ -42,6 +42,20 @@ Note the deliberate asymmetry: proxied app traffic keeps its `Host`
 untouched (multi-tenant subdomain routing needs it); only marquee's own
 endpoints validate `Host`.
 
+### Internal endpoints (read-only)
+
+`GET /__marquee/status` and `GET /__marquee/bar.js` are registered
+through the guarded mux, so they inherit the Host allowlist and
+`no-store` guards by construction. Both are GET-only (405 otherwise)
+and change no state. The status payload contains repository metadata
+only — branch, dirty flag, worktree paths, repo root, PR
+number/title/URL, child state. No environment variables, tokens, or
+command lines appear in any response or log line.
+
+- Code: `internal/status/status.go`
+- Tests: `TestHostGuardEnforcedThroughMux`, `TestStatusJSONShape`,
+  `TestStatusMethodNotAllowed` in `internal/status/status_test.go`
+
 ### Fail-open upstream errors
 
 Upstream connection failures never surface as raw errors: browser

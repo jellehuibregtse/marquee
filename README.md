@@ -6,11 +6,17 @@ With git worktrees and coding agents in the mix, "which code is my browser actua
 
 <!-- TODO(launch): demo GIF recorded against a small PUBLIC sample app — never an employer app -->
 
-![The expanded bar: a colored branch chip, a dirty-state dot, a worktree slug, and a PR link](docs/img/bar-expanded.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/bar-expanded-dark.png">
+  <img alt="The bar at the bottom of a dev app: a colored branch chip, a dirty-state dot, a worktree slug, and a PR link" src="docs/img/bar-expanded.png">
+</picture>
 
-Click it to collapse down to a single dot:
+Click it to collapse into a dot that tucks into the corner, out of your way:
 
-![The collapsed bar: a small dot in the corner](docs/img/bar-collapsed.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/bar-collapsed-dark.png">
+  <img alt="The collapsed bar: a small dot in the bottom-left corner of the page" src="docs/img/bar-collapsed.png">
+</picture>
 
 **Status: pre-alpha, not released.**
 

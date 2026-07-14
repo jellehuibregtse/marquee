@@ -175,6 +175,18 @@ func (r *Runner) Restart(ctx context.Context, dir string) error {
 	return r.Start()
 }
 
+// PGID reports the process-group id of the running child (the child
+// leads its own group, so this equals its pid). It returns 0 when no
+// child is running.
+func (r *Runner) PGID() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state != StateRunning {
+		return 0
+	}
+	return r.cmd.Process.Pid
+}
+
 // Status reports the current child state.
 func (r *Runner) Status() Status {
 	r.mu.Lock()

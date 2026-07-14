@@ -196,6 +196,98 @@ func TestToggleInvalidParamRejected(t *testing.T) {
 	assertInjected(t, body, true)
 }
 
+func setSecFetchSite(value string) func(*http.Request) {
+	return func(r *http.Request) {
+		r.Header.Set("Sec-Fetch-Site", value)
+	}
+}
+
+func TestToggleRejectsCrossOriginStateChange(t *testing.T) {
+	for _, site := range []string{"cross-site", "same-site"} {
+		t.Run(site, func(t *testing.T) {
+			proxySrv := bypassProxy(t)
+
+			resp, _ := get(t, proxySrv.URL+"/__marquee/toggle?bar=off", setSecFetchSite(site))
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("bar=off from %s: status = %d, want 403", site, resp.StatusCode)
+			}
+
+			// The rejected request must not have flipped the toggle.
+			_, body := get(t, proxySrv.URL+"/__marquee/toggle", nil)
+			if body != "bar: on\n" {
+				t.Fatalf("state after rejected %s toggle = %q, want %q", site, body, "bar: on\n")
+			}
+			_, body = get(t, proxySrv.URL+"/", nil)
+			assertInjected(t, body, true)
+		})
+	}
+}
+
+func TestToggleCrossSiteCannotForceBarOn(t *testing.T) {
+	proxySrv := bypassProxy(t)
+
+	// Put the bar off first via a legitimate typed navigation.
+	_, body := get(t, proxySrv.URL+"/__marquee/toggle?bar=off", setSecFetchSite("none"))
+	if body != "bar: off\n" {
+		t.Fatalf("same-origin bar=off confirmed %q, want %q", body, "bar: off\n")
+	}
+
+	// A cross-site page cannot force it back on either.
+	resp, _ := get(t, proxySrv.URL+"/__marquee/toggle?bar=on", setSecFetchSite("cross-site"))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-site bar=on: status = %d, want 403", resp.StatusCode)
+	}
+	_, body = get(t, proxySrv.URL+"/__marquee/toggle", nil)
+	if body != "bar: off\n" {
+		t.Fatalf("state after rejected cross-site bar=on = %q, want %q", body, "bar: off\n")
+	}
+}
+
+func TestToggleAllowsSameOriginAndDirectStateChange(t *testing.T) {
+	for name, mutate := range map[string]func(*http.Request){
+		"same-origin": setSecFetchSite("same-origin"),
+		"typed-nav":   setSecFetchSite("none"),
+		"curl":        nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			proxySrv := bypassProxy(t)
+
+			resp, body := get(t, proxySrv.URL+"/__marquee/toggle?bar=off", mutate)
+			if resp.StatusCode != http.StatusOK || body != "bar: off\n" {
+				t.Fatalf("%s bar=off: status = %d body = %q, want 200 %q", name, resp.StatusCode, body, "bar: off\n")
+			}
+			_, body = get(t, proxySrv.URL+"/", nil)
+			assertInjected(t, body, false)
+		})
+	}
+}
+
+func TestToggleNoParamReportsAcrossOrigins(t *testing.T) {
+	proxySrv := bypassProxy(t)
+
+	// A pure state report mutates nothing, so it stays open even cross-site.
+	resp, body := get(t, proxySrv.URL+"/__marquee/toggle", setSecFetchSite("cross-site"))
+	if resp.StatusCode != http.StatusOK || body != "bar: on\n" {
+		t.Fatalf("cross-site state report: status = %d body = %q, want 200 %q", resp.StatusCode, body, "bar: on\n")
+	}
+}
+
+func TestToggleInvalidParamRejectedRegardlessOfOrigin(t *testing.T) {
+	proxySrv := bypassProxy(t)
+
+	resp, body := get(t, proxySrv.URL+"/__marquee/toggle?bar=maybe", setSecFetchSite("cross-site"))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("cross-site bar=maybe: status = %d, want 400", resp.StatusCode)
+	}
+	if !strings.Contains(body, "usage:") {
+		t.Fatalf("cross-site bar=maybe: body %q lacks a usage hint", body)
+	}
+
+	// An invalid value never mutates, whatever the origin.
+	_, body = get(t, proxySrv.URL+"/", nil)
+	assertInjected(t, body, true)
+}
+
 func TestToggleGuardedByInternalMux(t *testing.T) {
 	proxySrv := bypassProxy(t)
 

@@ -52,22 +52,41 @@ func requestSkipsBar(r *http.Request) bool {
 
 const toggleUsage = "usage: GET /__marquee/toggle?bar=on|off (no parameter reports the current state)"
 
+// sameOriginOrDirect reports whether a state-changing toggle request may be
+// honored. Sec-Fetch-Site is set by browsers and cannot be forged by page
+// JS: a typed address-bar navigation sends "none" and a same-origin fetch
+// sends "same-origin", while a cross-site or same-site cross-origin page
+// (the CSRF vector) sends "cross-site" or "same-site". The header is absent
+// for curl and scripted use, which stays allowed — its absence is a
+// hardening signal, not a gate, so the legitimate CLI/typed use never breaks.
+func sameOriginOrDirect(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "none", "same-origin":
+		return true
+	default:
+		return false
+	}
+}
+
 // handleToggle serves GET /__marquee/toggle. Deliberately a GET so a human
 // can type it in the address bar mid-flow; it flips only the injection
-// toggle, never process state, which is why it carries no same-origin or
-// token guard (see docs/security.md).
+// toggle, never process state. The state-changing path (a valid bar=on|off)
+// rejects clearly cross-origin requests via Sec-Fetch-Site so a hostile page
+// cannot silently suppress the bar cross-site (see docs/security.md); the
+// no-param state report carries no guard.
 func (s *barSwitches) handleToggle(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	if query.Has("bar") {
-		switch query.Get("bar") {
-		case "on":
-			s.toggleOff.Store(false)
-		case "off":
-			s.toggleOff.Store(true)
-		default:
+		value := query.Get("bar")
+		if value != "on" && value != "off" {
 			http.Error(w, toggleUsage, http.StatusBadRequest)
 			return
 		}
+		if !sameOriginOrDirect(r) {
+			http.Error(w, "cross-origin bar toggle rejected", http.StatusForbidden)
+			return
+		}
+		s.toggleOff.Store(value == "off")
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	state := "on"

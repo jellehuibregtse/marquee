@@ -136,25 +136,40 @@ state, and an invalid parameter gets a 400 with a usage hint. It is
 registered through the guarded mux, so it inherits the Host allowlist
 and `no-store` guards, and it is GET-only (405 otherwise).
 
-This endpoint mutates state, but deliberately does **not** carry the
-stricter guards planned for process-state-changing endpoints
-(same-origin proof plus a per-process token — the §3.5 rules the v2
-switch endpoint will enforce). It is a GET on purpose: a human
-mid-flow types it into the address bar. The only thing it can change
-is whether the bar snippet is spliced into HTML responses — never
-process state, never proxying — and it discloses only the bar state
-plus, when the launch-time hard-off is active, the name of the
-documented setting that caused it (`MARQUEE_DISABLE_BAR`; never any
-environment variable value). The worst a hostile page could achieve
-by triggering it cross-site is hiding or showing the dev bar, which
-the operator flips back with one request;
-that cosmetic blast radius is why the lighter guard set is acceptable
-here and only here. `MARQUEE_DISABLE_BAR=1` at launch is a hard off
-that the toggle cannot override. Anything that spawns, signals, or
-selects a cwd keeps the full §3.5 rules.
+The state-changing path (a valid `bar=on|off`) additionally rejects
+clearly cross-origin requests. The Host allowlist is a DNS-rebinding
+defense, not a CSRF one: any cross-site page can fire
+`GET /__marquee/toggle?bar=off` (e.g. via `<img src>`) and a background
+tab can re-issue it on an interval to persistently suppress the bar's
+branch/dirty/PR safety indicator. To close that, the toggle consults
+`Sec-Fetch-Site`, which browsers set and page JS cannot forge: a typed
+address-bar navigation sends `none` and a same-origin fetch sends
+`same-origin` (both **allowed**), while a cross-site or same-site
+cross-origin page sends `cross-site`/`same-site` (**rejected with 403**,
+`toggleOff` unchanged). The header is absent for `curl` and scripted
+use, which stays **allowed** — its absence is a hardening signal, not a
+gate, so the documented "type it in the address bar" and CLI uses never
+break. The check applies only to the mutating path: a no-parameter state
+report changes nothing and discloses only the bar state (plus, when the
+launch-time hard-off is active, the name of the setting that caused it —
+`MARQUEE_DISABLE_BAR`, never any environment variable value), so it stays
+open even cross-site; an invalid value is a 400 before any origin check.
+
+This is still the lighter guard set relative to process-state-changing
+endpoints (which additionally require a per-process token — the §3.5 rules
+the v2 switch endpoint will enforce): the toggle only decides whether the
+bar snippet is spliced into HTML responses — never process state, never
+proxying. `MARQUEE_DISABLE_BAR=1` at launch is a hard off that the toggle
+cannot override. Anything that spawns, signals, or selects a cwd keeps the
+full §3.5 rules.
 
 - Code: `internal/proxy/bypass.go`
-- Tests: `TestToggleGuardedByInternalMux`, `TestToggleMethodNotAllowed`,
+- Tests: `TestToggleRejectsCrossOriginStateChange`,
+  `TestToggleCrossSiteCannotForceBarOn`,
+  `TestToggleAllowsSameOriginAndDirectStateChange`,
+  `TestToggleNoParamReportsAcrossOrigins`,
+  `TestToggleInvalidParamRejectedRegardlessOfOrigin`,
+  `TestToggleGuardedByInternalMux`, `TestToggleMethodNotAllowed`,
   `TestToggleInvalidParamRejected`,
   `TestEnvDisablesInjectionAndToggleCannotReenable` in
   `internal/proxy/bypass_test.go`
@@ -256,6 +271,7 @@ so the toolchain is kept small and continuously scanned.
 
 ## Not yet implemented
 
-- Same-origin + token guards for process-state-changing endpoints
-  (none exists yet; the switch endpoint lands in v2). The bar toggle
-  above deliberately opts out of these — see its section for why.
+- Per-process token guard for process-state-changing endpoints (none
+  exists yet; the switch endpoint lands in v2). The bar toggle above
+  enforces the same-origin half via `Sec-Fetch-Site` but deliberately
+  opts out of the token — see its section for why.

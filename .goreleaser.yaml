@@ -50,11 +50,12 @@ homebrew_casks:
     repository:
       owner: jellehuibregtse
       name: homebrew-tap
+      # The default GITHUB_TOKEN cannot write to the separate tap repo, so the
+      # release uses a scoped PAT stored as the TAP_GITHUB_TOKEN secret.
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/jellehuibregtse/marquee
     description: Local reverse proxy that shows branch, worktree, and PR info in a bar injected into your dev server's HTML
-    # The tap repo does not exist yet. This stays true until a human opens the
-    # publication gate and creates the tap; nothing may push to it before then.
-    skip_upload: true
+    skip_upload: false
     hooks:
       post:
         install: |

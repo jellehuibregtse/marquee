@@ -14,8 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jellehuibregtse/marquee/internal/ghinfo"
+	"github.com/jellehuibregtse/marquee/internal/gitinfo"
 	"github.com/jellehuibregtse/marquee/internal/proxy"
 	"github.com/jellehuibregtse/marquee/internal/runner"
+	"github.com/jellehuibregtse/marquee/internal/status"
 )
 
 var (
@@ -49,6 +52,12 @@ func run() int {
 	if len(command) == 0 {
 		flag.Usage()
 		return 2
+	}
+
+	workdir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "marquee: could not determine working directory: %v\n", err)
+		return 1
 	}
 
 	host, _, err := net.SplitHostPort(*listen)
@@ -87,7 +96,19 @@ func run() int {
 		return 1
 	}
 
-	srv := &http.Server{Handler: proxy.New(proxy.Config{InternalPort: port})}
+	git := gitinfo.Start(workdir, 2*time.Second, nil)
+	defer git.Stop()
+	gh := ghinfo.New(workdir)
+	defer gh.Stop()
+
+	handler := proxy.New(proxy.Config{InternalPort: port})
+	status.Register(handler.Internal(), status.Deps{
+		Git:        git.Snapshot,
+		PR:         gh.PR,
+		ChildState: func() string { return string(child.Status().State) },
+	})
+
+	srv := &http.Server{Handler: handler}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 

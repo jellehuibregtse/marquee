@@ -25,4 +25,12 @@ Attach mode — pure proxy in front of a server you manage yourself:
 marquee attach --listen 4000 --upstream http://localhost:3000
 ```
 
+## Disabling the bar (CI / screenshots / automation)
+
+Browser automation wants pristine pages — an unexpected fixed bar pollutes screenshots and can trip full-page assertions. Three switches turn injection off while proxying continues untouched:
+
+- **Per request:** send the header `X-Marquee: skip`. Set it once in a Playwright fixture (`use: { extraHTTPHeaders: { "X-Marquee": "skip" } }` in `playwright.config.ts`) or a Capybara driver that supports custom headers (e.g. Cuprite) and every page in the run comes back clean. The header is stripped before the request reaches your app.
+- **Per run:** launch with `MARQUEE_DISABLE_BAR=1 marquee -- bin/dev` and the bar stays off for the whole process — the toggle below cannot re-enable it.
+- **Mid-session:** open `/__marquee/toggle?bar=off` in the address bar to turn the bar off for everyone until `?bar=on` flips it back; without a parameter it reports the current state.
+
 ## FAQ

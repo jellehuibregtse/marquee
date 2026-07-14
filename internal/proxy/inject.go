@@ -27,20 +27,24 @@ const injectSizeCap = 10 << 20
 // client, and errors are logged once per distinct message (the gitinfo
 // discipline), never surfaced as a proxy error.
 type injector struct {
-	logger *log.Logger
+	logger   *log.Logger
+	switches *barSwitches
 
 	mu      sync.Mutex
 	lastMsg string
 }
 
-func newInjector(logger *log.Logger) *injector {
-	return &injector{logger: logger}
+func newInjector(logger *log.Logger, switches *barSwitches) *injector {
+	return &injector{logger: logger, switches: switches}
 }
 
 // modifyResponse is the ReverseProxy.ModifyResponse hook. It always returns
 // nil: returning an error would route the response into ErrorHandler and
 // replace a working upstream response, which fail-open forbids.
 func (in *injector) modifyResponse(resp *http.Response) error {
+	if !in.switches.allows(resp.Request) {
+		return nil
+	}
 	if !isInjectionCandidate(resp) || resp.ContentLength > injectSizeCap {
 		return nil
 	}

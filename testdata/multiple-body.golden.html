@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Fixture: multiple body closers</title>
+<script>
+  const fragment = "</body></html>";
+  console.log("the string above must not attract the splice", fragment);
+</script>
+</head>
+<body>
+<!-- an early literal </body> inside a comment -->
+<p>The real closer is the last one in the file.</p>
+<script type="module" src="/__marquee/bar.js"></script><marquee-bar></marquee-bar></body>
+</html>

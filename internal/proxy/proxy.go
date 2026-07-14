@@ -71,8 +71,9 @@ func New(cfg Config) *Handler {
 			r.Out.Host = r.In.Host
 			r.Out.Header.Set("Accept-Encoding", "identity")
 		},
-		FlushInterval: -1,
-		ErrorLog:      logger,
+		FlushInterval:  -1,
+		ModifyResponse: newInjector(logger).modifyResponse,
+		ErrorLog:       logger,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			logger.Printf("marquee: upstream error for %s %s: %v", r.Method, r.URL.Path, err)
 			h.probe.markDown()

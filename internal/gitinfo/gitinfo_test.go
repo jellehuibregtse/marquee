@@ -200,7 +200,11 @@ func TestPollerServesStaleOnFailure(t *testing.T) {
 	if got := p.Snapshot().Branch; got != "trunk" {
 		t.Fatalf("Branch = %q before failure, want %q", got, "trunk")
 	}
-	if err := os.RemoveAll(dir); err != nil {
+	// Rename instead of RemoveAll: removal is not atomic, so a poll racing a
+	// partial removal fails differently than one after full removal, which
+	// log-once correctly reports as two lines. Rename makes the directory
+	// vanish atomically, so every failed poll yields the same error.
+	if err := os.Rename(dir, filepath.Join(base, "gone")); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "failure to be logged", func() bool { return logs.count() >= 1 })

@@ -79,6 +79,10 @@ func TestInjectionGoldenFiles(t *testing.T) {
 		{name: "content type with charset injected", fixture: "normal.html", golden: "normal.golden.html", contentType: "text/html; charset=utf-8", status: http.StatusOK},
 		{name: "uppercase closing tag injected", fixture: "uppercase.html", golden: "uppercase.golden.html", contentType: "text/html", status: http.StatusOK},
 		{name: "multiple closers splice at last", fixture: "multiple-body.html", golden: "multiple-body.golden.html", contentType: "text/html", status: http.StatusOK},
+		{name: "trailing script closer skipped", fixture: "trailing-script.html", golden: "trailing-script.golden.html", contentType: "text/html", status: http.StatusOK},
+		{name: "trailing comment closer skipped", fixture: "trailing-comment.html", golden: "trailing-comment.golden.html", contentType: "text/html", status: http.StatusOK},
+		{name: "textarea closer before real close", fixture: "textarea-body.html", golden: "textarea-body.golden.html", contentType: "text/html", status: http.StatusOK},
+		{name: "only closer inside script skipped", fixture: "script-only-body.html", contentType: "text/html", status: http.StatusOK},
 		{name: "no closing body tag skipped", fixture: "fragment.html", contentType: "text/html", status: http.StatusOK},
 		{name: "json skipped", fixture: "data.json", contentType: "application/json", status: http.StatusOK},
 		{name: "500 skipped", fixture: "normal.html", contentType: "text/html", status: http.StatusInternalServerError},
@@ -385,6 +389,37 @@ func TestErrAbortHandlerPanicNotSwallowed(t *testing.T) {
 	}()
 	if recovered != http.ErrAbortHandler {
 		t.Fatalf("recovered %v, want http.ErrAbortHandler to keep propagating", recovered)
+	}
+}
+
+func TestStructuralBodyClose(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"none", "<html><p>no closer</p></html>", -1},
+		{"plain", "<body>x</body>", 7},
+		{"uppercase", "<BODY>x</BODY></HTML>", 7},
+		{"last real wins", "<body></body><body>x</body></html>", 20},
+		{"closer inside script skipped", `<body>x<script>t="</body>"</script></body>`, 35},
+		{"only closer inside script", `<body><script>t="</body>"</script>`, -1},
+		{"only closer inside comment", "<body><!-- </body> --></body-not>", -1},
+		{"trailing script after real close", "<body>x</body></html><script>\"</body>\"</script>", 7},
+		{"trailing comment after real close", "<body>x</body></html><!-- </body> -->", 7},
+		{"closer inside textarea before real", "<body><textarea></body></textarea></body>", 34},
+		{"unterminated script hides later closer", "<body></body><script></body>", 6},
+		{"unterminated comment hides later closer", "<body></body><!-- </body>", 6},
+		{"script prefix not a script element", "<body><scriptless></body>", 18},
+		{"double-escaped script falls open to real close", "<body>x</body>\n<script>\n<!--\n<script>\n</script>\n</body>\n</script>\n", 7},
+		{"double-escaped script with no earlier close skipped", "<body>\n<script>\n<!--\n<script>\n</script>\n</body>\n</script>\n", -1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := structuralBodyClose([]byte(tc.in)); got != tc.want {
+				t.Errorf("structuralBodyClose(%q) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 

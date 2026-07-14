@@ -142,7 +142,7 @@ func (in *injector) inject(resp *http.Response) {
 		return
 	}
 
-	idx := lastBodyClose(buf)
+	idx := structuralBodyClose(buf)
 	if idx < 0 {
 		restore()
 		return
@@ -167,13 +167,84 @@ func readCapped(r io.Reader, limit int64) (buf []byte, complete bool, err error)
 	return buf, int64(len(buf)) <= limit, nil
 }
 
-// lastBodyClose returns the index of the last case-insensitive </body> in b,
-// or -1. Scanning from the end keeps earlier occurrences (JS strings,
-// comments) from attracting the splice.
-func lastBodyClose(b []byte) int {
-	tag := []byte("</body>")
-	for i := len(b) - len(tag); i >= 0; i-- {
-		if bytes.EqualFold(b[i:i+len(tag)], tag) {
+// structuralBodyClose returns the index of the document's closing </body> —
+// the last case-insensitive </body> that lies in ordinary markup rather than
+// inside a <script> element or an HTML comment. A </body> that appears only in
+// a script's string literal or a comment (whether before or after the real
+// close) is not the document end, so it is skipped. When every occurrence is
+// inside such a region, or there is none, the result is -1 and the caller
+// passes the body through untouched. This keeps a full HTML parser out of the
+// hot path: a single forward scan, skipping the two regions that can carry a
+// literal </body> without meaning it.
+func structuralBodyClose(b []byte) int {
+	last := -1
+	for i := 0; i < len(b); {
+		switch {
+		case startsFold(b[i:], "<!--"):
+			end := indexFold(b[i+len("<!--"):], "-->")
+			if end < 0 {
+				return last
+			}
+			i += len("<!--") + end + len("-->")
+		case isScriptOpen(b, i):
+			gt := bytes.IndexByte(b[i:], '>')
+			if gt < 0 {
+				return last
+			}
+			content := i + gt + 1
+			end := indexFold(b[content:], "</script>")
+			if end < 0 {
+				return last
+			}
+			// A nested "<script" inside script content triggers HTML's
+			// double-escaped tokenizer state, where the first </script>
+			// does not close the element — so our region end diverges from
+			// the browser's. Rather than risk anchoring inside a still-open
+			// script, fail open at the last known-good structural close.
+			if indexFold(b[content:content+end], "<script") >= 0 {
+				return last
+			}
+			i = content + end + len("</script>")
+		case startsFold(b[i:], "</body>"):
+			last = i
+			i += len("</body>")
+		default:
+			i++
+		}
+	}
+	return last
+}
+
+// isScriptOpen reports whether b at i begins a <script> start tag. The byte
+// after "<script" must end the tag name (>, /, or whitespace) so that
+// "<scriptfoo" is not mistaken for a script element.
+func isScriptOpen(b []byte, i int) bool {
+	if !startsFold(b[i:], "<script") {
+		return false
+	}
+	next := i + len("<script")
+	if next >= len(b) {
+		return true
+	}
+	switch b[next] {
+	case '>', '/', ' ', '\t', '\n', '\r', '\f':
+		return true
+	default:
+		return false
+	}
+}
+
+// startsFold reports whether b begins with prefix, case-insensitively.
+func startsFold(b []byte, prefix string) bool {
+	return len(b) >= len(prefix) && bytes.EqualFold(b[:len(prefix)], []byte(prefix))
+}
+
+// indexFold returns the index of the first case-insensitive occurrence of sub
+// in b, or -1.
+func indexFold(b []byte, sub string) int {
+	s := []byte(sub)
+	for i := 0; i+len(s) <= len(b); i++ {
+		if bytes.EqualFold(b[i:i+len(s)], s) {
 			return i
 		}
 	}

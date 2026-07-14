@@ -23,6 +23,8 @@ func TestBarScriptEmbedded(t *testing.T) {
 		`rel="noreferrer"`,
 		"status.position",
 		`:host([position="top"])`,
+		"safeHttpUrl",
+		`url.protocol === "https:"`,
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("bar.js missing expected marker %q", marker)

@@ -14,9 +14,8 @@ security problem.
 The preferred channel is GitHub's private vulnerability reporting: on the
 [repository](https://github.com/jellehuibregtse/marquee), go to the
 **Security** tab and choose **Report a vulnerability**. This opens a private
-GitHub Security Advisory visible only to you and the maintainers.
-
-As a fallback you may email `<security contact — TODO: owner to fill in>`.
+GitHub Security Advisory visible only to you and the maintainers. This is the
+only reporting channel — there is no security email.
 
 In your report, please include:
 

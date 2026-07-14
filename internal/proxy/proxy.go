@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,9 @@ func New(cfg Config) *Handler {
 	}
 	upstream := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.InternalPort))
 	target := &url.URL{Scheme: "http", Host: upstream}
+	// Read once at startup; injection decisions never consult the
+	// environment at request time.
+	switches := newBarSwitches(os.Getenv("MARQUEE_DISABLE_BAR") == "1")
 
 	h := &Handler{
 		internal: NewInternalMux(cfg.AllowHosts...),
@@ -65,14 +69,23 @@ func New(cfg Config) *Handler {
 		},
 		logger: logger,
 	}
+	h.internal.HandleFunc("GET /__marquee/toggle", switches.handleToggle)
 	h.reverse = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 			r.Out.Host = r.In.Host
 			r.Out.Header.Set("Accept-Encoding", "identity")
+			for _, value := range r.In.Header.Values("X-Marquee") {
+				if strings.EqualFold(value, "skip") {
+					r.Out = markBarSkip(r.Out)
+					break
+				}
+			}
+			// The app never sees marquee plumbing.
+			r.Out.Header.Del("X-Marquee")
 		},
 		FlushInterval:  -1,
-		ModifyResponse: newInjector(logger).modifyResponse,
+		ModifyResponse: newInjector(logger, switches).modifyResponse,
 		ErrorLog:       logger,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			logger.Printf("marquee: upstream error for %s %s: %v", r.Method, r.URL.Path, err)

@@ -3,3 +3,4 @@ dist/
 cmd/marquee/marquee
 *.exe
 .DS_Store
+.claude/

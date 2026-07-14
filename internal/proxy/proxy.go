@@ -29,9 +29,10 @@ type Config struct {
 	// probe. When nil, the upstream falls back to 127.0.0.1:InternalPort
 	// (wrapper mode).
 	UpstreamURL *url.URL
-	// AllowHosts are extra Host values (exact match, port ignored)
-	// accepted on /__marquee/* in addition to the built-in loopback
-	// allowlist.
+	// AllowHosts are extra Host values accepted on /__marquee/* in
+	// addition to the built-in loopback allowlist. A plain entry is an
+	// exact match (port ignored); a "*.example.test" wildcard matches any
+	// subdomain. See NewInternalMux for the matching rules.
 	AllowHosts []string
 	// Logger receives operational messages (upstream errors). Defaults
 	// to log.Default().

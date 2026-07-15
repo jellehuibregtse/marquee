@@ -1,3 +1,5 @@
+import { DEFAULTS, merge } from "./prefs.js";
+
 const STORAGE_KEY = "marquee-bar-collapsed";
 const POLL_INTERVAL_MS = 5000;
 
@@ -353,14 +355,6 @@ function textSpan(text) {
   return span;
 }
 
-const POSITIONS = ["bottom-left", "bottom-right", "top-left", "top-right"];
-
-// Fail-open: a missing or unrecognized position falls back to bottom-left,
-// matching the CLI default, so a bad payload never leaves the bar unanchored.
-function positionOrDefault(value) {
-  return POSITIONS.includes(value) ? value : "bottom-left";
-}
-
 function safeHttpUrl(value) {
   try {
     const url = new URL(value, location.href);
@@ -464,7 +458,10 @@ class MarqueeBar extends HTMLElement {
       return;
     }
     this.#wrap.hidden = false;
-    this.setAttribute("data-position", positionOrDefault(status.position));
+    // The CLI/status default is validated against the fallback defaults, so a
+    // missing or unrecognized position never leaves the bar unanchored.
+    const effective = merge(DEFAULTS, { position: status.position });
+    this.setAttribute("data-position", effective.position);
     const colors = branchColors(status.branch, this.#dark.matches);
     this.#branch.textContent = status.branch;
     this.#branch.style.background = colors.background;

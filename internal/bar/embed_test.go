@@ -58,6 +58,10 @@ func TestBarScriptEmbedded(t *testing.T) {
 		"marquee-shimmer",
 		"prefers-reduced-motion",
 		"#statusPolls",
+		// ES-module split (PR 3): bar.js is no longer self-contained — it
+		// imports the pure prefs core from the sibling prefs.js module, served
+		// same-origin under the 'self' CSP relaxation.
+		`from "./prefs.js"`,
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("bar.js missing expected marker %q", marker)
@@ -72,6 +76,49 @@ func TestBarScriptEmbedded(t *testing.T) {
 	} {
 		if strings.Contains(js, forbidden) {
 			t.Errorf("bar.js contains forbidden pattern %q", forbidden)
+		}
+	}
+}
+
+func TestPrefsModuleEmbedded(t *testing.T) {
+	data, err := Assets.ReadFile("prefs.js")
+	if err != nil {
+		t.Fatalf("read embedded prefs.js: %v", err)
+	}
+	js := string(data)
+	if len(js) == 0 {
+		t.Fatal("embedded prefs.js is empty")
+	}
+
+	// The pure prefs core (PR 3): the exported interface consumed by bar.js and
+	// settings.js, and the four-corner position table it validates against.
+	for _, marker := range []string{
+		"export const DEFAULTS",
+		"export const POSITIONS",
+		"export function load",
+		"export function merge",
+		"export function save",
+		"export function reset",
+		"export function validate",
+		"marquee-bar-prefs",
+		"bottom-left",
+		"top-right",
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("prefs.js missing expected marker %q", marker)
+		}
+	}
+
+	// prefs.js is pure: no DOM, no network, no dynamic code.
+	for _, forbidden := range []string{
+		"eval(",
+		"document",
+		"localStorage",
+		"fetch(",
+		"import(",
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Errorf("prefs.js contains forbidden pattern %q", forbidden)
 		}
 	}
 }

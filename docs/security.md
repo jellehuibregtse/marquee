@@ -219,9 +219,20 @@ letting the request choose a path:
   operator-supplied, never HTTP-derived; the switch changes the runner's `cwd`
   to a git-reported path, not the argv.
 
-`--switch-hook` (per-worktree setup such as `pnpm install`) is a **deliberate
-deferral** — not built in this change. When adopted it must be
-operator-configured on the command line, never influenced by HTTP input.
+**`--switch-hook` does not widen this surface.** The optional `--switch-hook`
+command (per-worktree bootstrap such as `bundle install`) is **operator input
+from the CLI flag**, exactly like the wrapped dev command itself — it is never
+derived from the HTTP request or the slug. The only request-derived value in a
+switch remains the validated slug, which selects *which* git-reported worktree
+to act on but never contributes a single byte to the hook command. The switcher
+runs the hook with `exec.CommandContext(ctx, "sh", "-c", hookCmd)` and its `cwd`
+set to git's own worktree path (never a request-derived path), so it introduces
+no new way for HTTP input to choose a command or a directory. The `sh -c` form
+is deliberate — operators write pipelines and `&&` chains — and carries a
+justified `#nosec G204` recording that `hookCmd` is operator-only. A failing
+hook (non-zero exit or timeout) fails the switch and reverts, and the hook never
+runs on the revert leg. See the "Worktree switch endpoint" section for where it
+sits in the guard/switch sequence.
 
 The one signal-adjacent path from v1 — the stale-child pidfile warning — is
 hardened against corrupt input: see Threat 7's pidfile note.
@@ -471,10 +482,11 @@ returns 400 `bad_request` before step 5. This is side-effect-free (no git
 subcommand, no process action), so it does not change the "no action before the
 guards pass" guarantee.
 
-Only after all guards pass does marquee stop the child and
-`runner.Restart(ctx, worktreePath)`, TCP-health-poll the new child, and — only
-once it is healthy — **repoint both the gitinfo and ghinfo pollers** to the new
-worktree (otherwise the bar keeps reporting the old worktree — the exact lie the
+Only after all guards pass does marquee — optionally — run the operator's
+`--switch-hook` in the **target worktree** (`cwd` = git's own worktree path), then
+stop the child and `runner.Restart(ctx, worktreePath)`, TCP-health-poll the new
+child, and — only once it is healthy — **repoint both the gitinfo and ghinfo
+pollers** to the new worktree (otherwise the bar keeps reporting the old worktree — the exact lie the
 tool exists to prevent). `Poller.Repoint` swaps the collection directory under
 the same mutex that guards the cached snapshot, so a concurrent status read
 never sees a torn state (covered by `-race` tests). While a switch is in
@@ -516,6 +528,35 @@ user:
   the restart before the revert spawns, so a failed switch never orphans a
   process.
 
+**Switch hook (`--switch-hook`).** A fresh worktree often cannot boot until its
+dependencies are installed (git-sourced gems, `node_modules`), so a switch into
+it would otherwise fail. The optional `--switch-hook` command bootstraps the
+target worktree first: it runs in the target directory (`cwd` = git's worktree
+path) **before** the child is restarted there, via
+`exec.CommandContext(ctx, "sh", "-c", hookCmd)`, bounded by a hook timeout
+(default 5 minutes; bootstrapping is slow) that runs inside the same managed
+window and busy lock as the rest of the switch. Its stdout and stderr are
+streamed to marquee's stderr, prefixed `switch-hook: …`, so the operator sees
+progress and errors. It is **off by default** and, as Threat 4 records, is
+operator-only CLI input — never influenced by the HTTP request or the slug. A
+hook failure (non-zero exit or timeout) reuses the **same revert path** a failed
+boot uses: the child is never restarted in the target, marquee reverts to the
+previous worktree, and the response is `switch_failed` (never `{"ok":true}`),
+marquee still alive. The hook runs **only for the forward switch**, never on the
+revert — the previous worktree already worked, so re-bootstrapping it would be
+wasteful and could fail spuriously.
+
+Known limitation (accepted): **process managers that daemonize.** marquee stops
+the child by killing its whole process group. A manager such as `overmind` or a
+`tmux`-based runner daemonizes its server into a *separate* session, so those
+grandchildren are not in the killed group and may survive a switch, still
+holding the internal port. Such a switch fails **cleanly**: the restarted child
+cannot bind the occupied port, so it fails to boot and the switch takes the
+revert / both-fail path (marquee stays alive, reports `switch_failed`, and the
+user can recover) rather than corrupting state. A full teardown for daemonizing
+managers (tracking and terminating out-of-group descendants) is future work,
+deliberately not built here.
+
 Known limitation (accepted): a switch's managed window suppresses child-exit
 shutdown until it closes. If a just-health-checked child dies in the sub-
 millisecond tail between passing the health probe and the window closing on an
@@ -538,7 +579,8 @@ snippet is byte-identical to before; the tokened case is asserted separately
 with a fixed token, and no golden encodes the random value.
 
 - Code: `internal/switcher/switcher.go` (whole file — `Handler.serve`,
-  `switchInto` for the restart→health→repoint step and the single revert);
+  `switchInto` for the (hook→)restart→health→repoint step and the single revert,
+  `runSwitchHook` for the operator hook run in the target worktree);
   `Runner.Terminated`, `Runner.BeginManaged`/`EndManaged`, the managed window in
   `Runner.Restart`, and the managed-aware wait goroutine in
   `internal/runner/runner.go`; the `child.Terminated()` select in `run`
@@ -556,9 +598,15 @@ with a fixed token, and no golden encodes the random value.
   `internal/switcher/switcher_test.go`; the real-runner integration tests
   `TestIntegrationHealthySwitchKeepsMarqueeUp`,
   `TestIntegrationFailedSwitchRevertsAndStaysAlive`,
-  `TestIntegrationBothFailStaysAlive` in
-  `internal/switcher/integration_test.go` (each asserts the shutdown signal is
-  or is not triggered against the real process lifecycle); the runner-level
+  `TestIntegrationBothFailStaysAlive`,
+  `TestIntegrationSwitchHookRunsInTargetWorktree` (the hook's marker lands in the
+  target worktree and the child then boots there), `TestSwitchHookFailureRevertsWithoutTargetRestart`
+  (a failing hook reverts via the existing path, restarting only the previous
+  worktree, window balanced), `TestIntegrationFailingSwitchHookRevertsAndStaysAlive`
+  (a failing hook reverts, stays alive, and never boots the target),
+  `TestIntegrationSwitchHookNotRunOnRevert` (the hook runs exactly once — forward
+  only) in `internal/switcher/integration_test.go` (each asserts the shutdown
+  signal is or is not triggered against the real process lifecycle); the runner-level
   lifecycle tests `TestTerminatedFiresOnUnmanagedExit` (wrapper-mode regression),
   `TestTerminatedNotFiredDuringRestart` (`-race`),
   `TestManagedWindowSuppressesTerminatedForever`,
@@ -616,8 +664,10 @@ local, single-user dev tool; they are documented here, not fixed.
 
 ## Deferred
 
-- **`--switch-hook` (per-worktree setup).** Running a setup command such as
-  `pnpm install` when a switched-into worktree lacks `node_modules` is a
-  deliberate follow-up, not built here. When adopted it must be
-  operator-configured on the command line and never influenced by HTTP input
-  (Threat 4).
+- **Full teardown for daemonizing process managers.** marquee stops the child by
+  killing its process group; a manager (e.g. `overmind`, a `tmux`-based runner)
+  that daemonizes its server into a separate session can leave grandchildren
+  holding the internal port across a switch. Today that fails cleanly via the
+  revert / both-fail path (marquee stays alive); tracking and terminating
+  out-of-group descendants is a deliberate follow-up, not built here. See the
+  "Worktree switch endpoint" section.

@@ -73,6 +73,7 @@ Everything after `--` is your command, run verbatim.
 | `--no-open` | off | Don't open the browser on startup. |
 | `--quiet` | off | Suppress marquee's own log lines. |
 | `--allow-host` | — | Add a hostname to the internal-endpoint allowlist (repeatable). |
+| `--switch-hook` | — | Command run in the target worktree before switching to it, e.g. `"bundle install"`. Bootstraps a fresh worktree; a failing hook reverts the switch. |
 | `--unsafe-listen` | off | Allow a non-loopback `--listen` address. Prints a persistent warning; exposes your dev app to the network. |
 
 ### Attach mode

@@ -61,6 +61,15 @@ type Config struct {
 	// Health blocks until the restarted child accepts connections or ctx is
 	// done. May be nil (no health wait).
 	Health func(ctx context.Context) error
+	// ChildAlive reports whether the wrapped child process is currently running.
+	// The switch consults it right after the health probe: a TCP health probe can
+	// pass by connecting to a STALE listener — an escaped daemon left by the old
+	// child, still holding the internal port — so a passing probe alone does not
+	// prove the NEW child actually booted. If the child has exited, the switch is
+	// treated as a failure and reverted; marquee must never declare a switch
+	// successful on a dead child, nor shut itself down because of a switch. May be
+	// nil (the liveness check is skipped).
+	ChildAlive func() bool
 	// Dir is the worktree the child starts in (marquee's launch cwd).
 	Dir string
 	// Logger receives operational messages. Defaults to log.Default().
@@ -88,6 +97,7 @@ type Handler struct {
 	collect        func(dir string) (gitinfo.Snapshot, error)
 	repoint        func(dir string)
 	health         func(ctx context.Context) error
+	childAlive     func() bool
 	logger         *log.Logger
 	restartTimeout time.Duration
 	healthTimeout  time.Duration
@@ -111,6 +121,7 @@ func New(cfg Config) *Handler {
 		collect:        cfg.Collect,
 		repoint:        cfg.Repoint,
 		health:         cfg.Health,
+		childAlive:     cfg.ChildAlive,
 		logger:         cfg.Logger,
 		currentDir:     cfg.Dir,
 		restartTimeout: orDuration(cfg.RestartTimeout, 30*time.Second),
@@ -274,6 +285,15 @@ func (h *Handler) switchInto(dir string, runHook bool) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// A passing health probe is not proof the new child booted: with a
+	// daemonizing process manager, the probe can connect to a STALE listener an
+	// escaped remnant of the OLD child is still holding. Require the child to be
+	// actually running, so a switch to a child that has exited is a failure (and
+	// reverts) rather than a fake success that later shuts marquee down.
+	if h.childAlive != nil && !h.childAlive() {
+		return fmt.Errorf("child exited before becoming healthy in %s", dir)
 	}
 
 	h.mu.Lock()

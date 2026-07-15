@@ -133,12 +133,13 @@ func run() int {
 	if switchToken != "" {
 		healthAddr := fmt.Sprintf("127.0.0.1:%d", port)
 		sw := switcher.New(switcher.Config{
-			Token:   switchToken,
-			Runner:  child,
-			Collect: gitinfo.Collect,
-			Repoint: func(dir string) { git.Repoint(dir); gh.Repoint(dir) },
-			Health:  func(ctx context.Context) error { return runner.WaitTCP(ctx, healthAddr, 0) },
-			Dir:     workdir,
+			Token:      switchToken,
+			Runner:     child,
+			Collect:    gitinfo.Collect,
+			Repoint:    func(dir string) { git.Repoint(dir); gh.Repoint(dir) },
+			Health:     func(ctx context.Context) error { return runner.WaitTCP(ctx, healthAddr, 0) },
+			Dir:        workdir,
+			SwitchHook: opts.switchHook,
 		})
 		switcher.Register(handler.Internal(), sw)
 		handler.SetSwitchingProbe(sw.SwitchingSlug)

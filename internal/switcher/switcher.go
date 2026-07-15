@@ -8,13 +8,16 @@
 package switcher
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,6 +68,16 @@ type Config struct {
 	RestartTimeout time.Duration
 	// HealthTimeout bounds the post-restart health wait; defaults to 30s.
 	HealthTimeout time.Duration
+	// SwitchHook is an optional operator-supplied command run in the target
+	// worktree (cwd = git's own worktree path) before the child is restarted
+	// there, so a fresh worktree can be bootstrapped (e.g. "bundle install").
+	// It is CLI input, never influenced by the HTTP request or the slug, and is
+	// run through "sh -c" so pipelines/&& work. Empty disables it. A failing
+	// hook fails the switch and reverts, exactly like a failed boot; the hook
+	// never runs on the revert leg (the previous worktree already worked).
+	SwitchHook string
+	// HookTimeout bounds the switch hook; defaults to 5m (bootstrapping is slow).
+	HookTimeout time.Duration
 }
 
 // Handler serves POST /__marquee/switch.
@@ -77,6 +90,8 @@ type Handler struct {
 	logger         *log.Logger
 	restartTimeout time.Duration
 	healthTimeout  time.Duration
+	switchHook     string
+	hookTimeout    time.Duration
 
 	mu         sync.Mutex // serializes switches; guards busy and currentDir
 	busy       bool
@@ -99,6 +114,8 @@ func New(cfg Config) *Handler {
 		currentDir:     cfg.Dir,
 		restartTimeout: orDuration(cfg.RestartTimeout, 30*time.Second),
 		healthTimeout:  orDuration(cfg.HealthTimeout, 30*time.Second),
+		switchHook:     cfg.SwitchHook,
+		hookTimeout:    orDuration(cfg.HookTimeout, 5*time.Minute),
 	}
 	if h.logger == nil {
 		h.logger = log.Default()
@@ -194,7 +211,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	h.setSwitching(target.Slug)
 	defer h.setSwitching("")
 
-	switchErr := h.switchInto(target.Path)
+	switchErr := h.switchInto(target.Path, true)
 	if switchErr == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":     true,
@@ -209,8 +226,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	// Revert exactly once, back to the previous worktree. Whether the revert
 	// itself comes up healthy or not, marquee stays alive (a dead-but-alive
 	// marquee the user can retry beats one that vanished); the response always
-	// reports the switch as a failure, never a fake success.
-	if err := h.switchInto(prevDir); err != nil {
+	// reports the switch as a failure, never a fake success. The switch hook
+	// does NOT run on the revert: the previous worktree already worked, so
+	// re-bootstrapping it is wasteful and could fail spuriously.
+	if err := h.switchInto(prevDir, false); err != nil {
 		h.logf("revert to %q also failed: %v", prevDir, err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error":    "switch_failed",
@@ -228,11 +247,19 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// switchInto restarts the child in dir and waits for it to become healthy. On
-// success it repoints the pollers and records dir as the current worktree; on
-// failure (the restart could not start, or the child never became healthy) it
-// returns the error and leaves currentDir untouched so a revert restores it.
-func (h *Handler) switchInto(dir string) error {
+// switchInto optionally runs the switch hook in dir, then restarts the child
+// there and waits for it to become healthy. On success it repoints the pollers
+// and records dir as the current worktree; on failure (the hook errored, the
+// restart could not start, or the child never became healthy) it returns the
+// error and leaves currentDir untouched so a revert restores it. runHook is
+// true only for the forward switch into the target — never for the revert.
+func (h *Handler) switchInto(dir string, runHook bool) error {
+	if runHook {
+		if err := h.runSwitchHook(dir); err != nil {
+			return err
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), h.restartTimeout)
 	defer cancel()
 	if err := h.runner.Restart(ctx, dir); err != nil {
@@ -255,6 +282,67 @@ func (h *Handler) switchInto(dir string) error {
 		h.repoint(dir)
 	}
 	return nil
+}
+
+// runSwitchHook runs the operator's switch hook in the target worktree so a
+// fresh worktree can be bootstrapped before the child starts there. It is a
+// no-op when no hook is configured. The hook's stdout and stderr are streamed
+// to marquee's logger, prefixed, so the user sees bootstrap progress and
+// errors; a non-zero exit or a timeout returns an error, which the caller turns
+// into a reverting switch failure.
+func (h *Handler) runSwitchHook(dir string) error {
+	if h.switchHook == "" {
+		return nil
+	}
+	h.logf("switch-hook: running %q in %s", h.switchHook, dir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), h.hookTimeout)
+	defer cancel()
+
+	// #nosec G204 -- switchHook is the operator's own CLI flag value (like the
+	// wrapped dev command itself), never derived from the HTTP request or the
+	// slug; dir is git's own worktree path, not request input. Running it via
+	// "sh -c" is deliberate so operators can write pipelines and && chains.
+	cmd := exec.CommandContext(ctx, "sh", "-c", h.switchHook)
+	cmd.Dir = dir
+	out := &hookOutput{logf: h.logf}
+	cmd.Stdout = out
+	cmd.Stderr = out
+	err := cmd.Run()
+	out.flush()
+	if err != nil {
+		return fmt.Errorf("switch-hook %q failed: %w", h.switchHook, err)
+	}
+	return nil
+}
+
+// hookOutput forwards a subprocess's combined output to the logger one line at
+// a time, each line prefixed so switch-hook progress is distinguishable in
+// marquee's stderr. os/exec guarantees no concurrent Write when the same writer
+// is used for both Stdout and Stderr, so no lock is needed.
+type hookOutput struct {
+	logf func(string, ...any)
+	buf  []byte
+}
+
+func (o *hookOutput) Write(p []byte) (int, error) {
+	o.buf = append(o.buf, p...)
+	for {
+		i := bytes.IndexByte(o.buf, '\n')
+		if i < 0 {
+			break
+		}
+		o.logf("switch-hook: %s", o.buf[:i])
+		o.buf = o.buf[i+1:]
+	}
+	return len(p), nil
+}
+
+func (o *hookOutput) flush() {
+	if len(o.buf) > 0 {
+		o.logf("switch-hook: %s", o.buf)
+		o.buf = nil
+	}
 }
 
 func (h *Handler) tokenOK(r *http.Request) bool {

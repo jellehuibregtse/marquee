@@ -25,6 +25,7 @@ type options struct {
 	allowHosts   []string
 	unsafeListen bool
 	keepCSP      bool
+	switchHook   string
 	showVersion  bool
 	command      []string
 }
@@ -52,6 +53,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen, exposing the proxy to the network")
 	fs.BoolVar(&opts.keepCSP, "keep-csp", false, "leave the app's Content-Security-Policy untouched (the bar may not load if its CSP forbids same-origin scripts)")
+	fs.StringVar(&opts.switchHook, "switch-hook", "", "command run in the target worktree before switching to it (e.g. \"bundle install\"); empty disables it")
 	fs.BoolVar(&opts.showVersion, "version", false, "print version and exit")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintln(out, "usage: marquee [flags] -- command [args...]")
@@ -87,6 +89,7 @@ type attachOptions struct {
 	allowHosts   []string
 	unsafeListen bool
 	keepCSP      bool
+	switchHook   string
 }
 
 func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions, error) {
@@ -101,6 +104,7 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen and --upstream, exposing the proxy to the network")
 	fs.BoolVar(&opts.keepCSP, "keep-csp", false, "leave the app's Content-Security-Policy untouched (the bar may not load if its CSP forbids same-origin scripts)")
+	fs.StringVar(&opts.switchHook, "switch-hook", "", "command run in the target worktree before switching to it (e.g. \"bundle install\"); empty disables it")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintln(out, "usage: marquee attach --upstream <url> [flags]")
 		fs.PrintDefaults()

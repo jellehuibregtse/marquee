@@ -588,3 +588,52 @@ func TestHealthFailureRevertsToPreviousWorktree(t *testing.T) {
 		t.Errorf("repoint calls = %v, want [/repo/main]", got)
 	}
 }
+
+// A switch whose target restart and health probe both "succeed" but whose child
+// has already exited (the stale-listener case: the probe connected to a remnant
+// of the old child) must be treated as a failure and revert — never a fake
+// ok:true. ChildAlive is false for the target and true for the revert.
+func TestSwitchFailsWhenChildDiesDespiteHealthOK(t *testing.T) {
+	runner := &fakeRunner{}
+	repoint := &repointTracker{}
+	h := newHarness(t, switcher.Config{
+		Runner:  runner,
+		Repoint: repoint.repoint,
+		Dir:     "/repo/main",
+		Health:  func(context.Context) error { return nil }, // stale listener answers
+		ChildAlive: func() bool {
+			dirs := runner.restarts()
+			// The target's child has exited; the reverted previous child is alive.
+			return dirs[len(dirs)-1] != "/repo/feature"
+		},
+	})
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body %s", rec.Code, rec.Body.String())
+	}
+	if code := errorCode(t, rec); code != "switch_failed" {
+		t.Errorf("error = %q, want %q", code, "switch_failed")
+	}
+	var body struct {
+		OK       bool `json:"ok"`
+		Reverted bool `json:"reverted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.OK {
+		t.Error("a switch to a dead child reported ok:true despite the health probe passing")
+	}
+	if !body.Reverted {
+		t.Error("reverted = false, but the previous worktree's child was alive")
+	}
+	if got := runner.restarts(); len(got) != 2 || got[0] != "/repo/feature" || got[1] != "/repo/main" {
+		t.Errorf("restarts = %v, want [/repo/feature /repo/main]", got)
+	}
+	if got := repoint.calls(); len(got) != 1 || got[0] != "/repo/main" {
+		t.Errorf("repoint calls = %v, want [/repo/main] (never repoint to a dead target)", got)
+	}
+	if runner.managedDepth() != 0 {
+		t.Errorf("managed depth = %d after serve, want 0", runner.managedDepth())
+	}
+}

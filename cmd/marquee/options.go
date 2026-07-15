@@ -46,11 +46,28 @@ func validSize(s string) bool {
 
 const validSizes = "small, medium, large"
 
+// themeUsage documents the curated themes --theme accepts; validTheme enforces
+// them and validThemes renders them for the error message. The names mirror the
+// bar's THEMES table; "default" reproduces the original light/dark look.
+const themeUsage = "the bar's color theme: default, midnight, sand, or forest"
+
+func validTheme(t string) bool {
+	switch t {
+	case "default", "midnight", "sand", "forest":
+		return true
+	default:
+		return false
+	}
+}
+
+const validThemes = "default, midnight, sand, forest"
+
 type options struct {
 	listen       string
 	internalPort int
 	position     string
 	size         string
+	theme        string
 	noOpen       bool
 	quiet        bool
 	allowHosts   []string
@@ -80,6 +97,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.IntVar(&opts.internalPort, "internal-port", 0, "port the child binds to (0 picks a free port)")
 	fs.StringVar(&opts.position, "position", "bottom-left", positionUsage)
 	fs.StringVar(&opts.size, "size", "medium", sizeUsage)
+	fs.StringVar(&opts.theme, "theme", "default", themeUsage)
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the app is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -105,6 +123,10 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 		_, _ = fmt.Fprintf(out, "marquee: invalid --size %q: must be one of %s\n", opts.size, validSizes)
 		return nil, errUsage
 	}
+	if !validTheme(opts.theme) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --theme %q: must be one of %s\n", opts.theme, validThemes)
+		return nil, errUsage
+	}
 	if !opts.showVersion && len(opts.command) == 0 {
 		fs.Usage()
 		return nil, errUsage
@@ -121,6 +143,7 @@ type attachOptions struct {
 	upstreamURL  *url.URL
 	position     string
 	size         string
+	theme        string
 	noOpen       bool
 	quiet        bool
 	allowHosts   []string
@@ -136,6 +159,7 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 	fs.StringVar(&opts.upstream, "upstream", "", "upstream URL to proxy to, e.g. http://localhost:3100 (required, loopback only unless --unsafe-listen)")
 	fs.StringVar(&opts.position, "position", "bottom-left", positionUsage)
 	fs.StringVar(&opts.size, "size", "medium", sizeUsage)
+	fs.StringVar(&opts.theme, "theme", "default", themeUsage)
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the upstream is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -158,6 +182,10 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 	}
 	if !validSize(opts.size) {
 		_, _ = fmt.Fprintf(out, "marquee: invalid --size %q: must be one of %s\n", opts.size, validSizes)
+		return nil, errUsage
+	}
+	if !validTheme(opts.theme) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --theme %q: must be one of %s\n", opts.theme, validThemes)
 		return nil, errUsage
 	}
 	u, err := parseUpstream(opts.upstream)

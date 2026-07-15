@@ -21,6 +21,9 @@ func TestParseArgsDefaults(t *testing.T) {
 	if opts.size != "medium" {
 		t.Errorf("size = %q, want medium", opts.size)
 	}
+	if opts.theme != "default" {
+		t.Errorf("theme = %q, want default", opts.theme)
+	}
 	if opts.noOpen || opts.quiet || opts.unsafeListen {
 		t.Errorf("bool flags default true: %+v", opts)
 	}
@@ -116,6 +119,35 @@ func TestParseArgsInvalidSize(t *testing.T) {
 	for _, size := range []string{"small", "medium", "large"} {
 		if !strings.Contains(out, size) {
 			t.Errorf("error message does not list %q: %q", size, out)
+		}
+	}
+}
+
+func TestParseArgsThemes(t *testing.T) {
+	for _, theme := range []string{"default", "midnight", "sand", "forest"} {
+		opts, err := parseArgs("marquee", []string{"--theme", theme, "--", "bin/dev"}, io.Discard)
+		if err != nil {
+			t.Fatalf("parseArgs(--theme %s): %v", theme, err)
+		}
+		if opts.theme != theme {
+			t.Errorf("theme = %q, want %q", opts.theme, theme)
+		}
+	}
+}
+
+func TestParseArgsInvalidTheme(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseArgs("marquee", []string{"--theme", "neon", "--", "bin/dev"}, &buf)
+	if err == nil {
+		t.Fatal("parseArgs accepted an invalid --theme")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "invalid --theme") {
+		t.Errorf("missing error message: %q", out)
+	}
+	for _, theme := range []string{"default", "midnight", "sand", "forest"} {
+		if !strings.Contains(out, theme) {
+			t.Errorf("error message does not list %q: %q", theme, out)
 		}
 	}
 }

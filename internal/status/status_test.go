@@ -61,6 +61,7 @@ func fixtureDeps(t *testing.T, pr func() *ghinfo.PR) (status.Deps, string) {
 		ChildState: func() string { return "running" },
 		Position:   "bottom",
 		Size:       "medium",
+		Theme:      "default",
 	}, dir
 }
 
@@ -123,7 +124,7 @@ func TestStatusJSONShape(t *testing.T) {
 	}
 
 	doc := assertKeys(t, "status", rec.Body.Bytes(),
-		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size")
+		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size", "theme")
 	assertKeys(t, "worktree", doc["worktree"], "path", "slug", "isMain")
 	assertKeys(t, "child", doc["child"], "state")
 
@@ -132,6 +133,9 @@ func TestStatusJSONShape(t *testing.T) {
 	}
 	if string(doc["size"]) != `"medium"` {
 		t.Errorf("size = %s, want \"medium\"", doc["size"])
+	}
+	if string(doc["theme"]) != `"default"` {
+		t.Errorf("theme = %s, want \"default\"", doc["theme"])
 	}
 
 	if string(doc["branch"]) != `"trunk"` {
@@ -173,7 +177,7 @@ func TestStatusIncludesPR(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	doc := assertKeys(t, "status", rec.Body.Bytes(),
-		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size")
+		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size", "theme")
 	assertKeys(t, "pr", doc["pr"], "number", "title", "url")
 	var got ghinfo.PR
 	if err := json.Unmarshal(doc["pr"], &got); err != nil || got != *pr {
@@ -214,6 +218,24 @@ func TestStatusReportsSize(t *testing.T) {
 	}
 	if string(doc["size"]) != `"large"` {
 		t.Errorf("size = %s, want \"large\"", doc["size"])
+	}
+}
+
+func TestStatusReportsTheme(t *testing.T) {
+	deps, _ := fixtureDeps(t, func() *ghinfo.PR { return nil })
+	deps.Theme = "midnight"
+	mux := newMux(t, deps)
+
+	rec := get(mux, "http://localhost/__marquee/status")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if string(doc["theme"]) != `"midnight"` {
+		t.Errorf("theme = %s, want \"midnight\"", doc["theme"])
 	}
 }
 

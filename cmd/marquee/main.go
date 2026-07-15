@@ -136,6 +136,7 @@ func run() int {
 		ChildState: func() string { return string(child.Status().State) },
 		Position:   opts.position,
 		Size:       opts.size,
+		Theme:      opts.theme,
 	})
 	if switchToken != "" {
 		healthAddr := fmt.Sprintf("127.0.0.1:%d", port)

@@ -41,6 +41,22 @@ func TestBarScriptEmbedded(t *testing.T) {
 		`:host([data-size="small"])`,
 		`:host([data-size="large"])`,
 		"calc(28px * var(--mq-scale, 1))",
+		// Curated themes (PR 5): the chrome palette lives in custom properties so
+		// a theme is a value set, the effective theme rides a data-theme
+		// attribute (fail-open to default), and each curated theme is a
+		// scheme-independent :host attribute rule. The branch chip is untouched —
+		// no theme selector sets its color, preserving its hash-contrast guarantee.
+		"status.theme",
+		"data-theme",
+		"--mq-bg",
+		"--mq-fg",
+		"--mq-border",
+		"--mq-chip-bg",
+		`background: var(--mq-bg)`,
+		`background: var(--mq-chip-bg)`,
+		`:host([data-theme="midnight"])`,
+		`:host([data-theme="sand"])`,
+		`:host([data-theme="forest"])`,
 		"safeHttpUrl",
 		`url.protocol === "https:"`,
 		// Worktree switcher (M4-T2): the POST target, the token header echoed
@@ -123,6 +139,12 @@ func TestPrefsModuleEmbedded(t *testing.T) {
 		// same generic way as position.
 		"export const SIZES",
 		`size: "medium"`,
+		// Curated themes (PR 5): the theme table and its default, validated the
+		// same generic way as position and size.
+		"export const THEMES",
+		`theme: "default"`,
+		"midnight",
+		"forest",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("prefs.js missing expected marker %q", marker)
@@ -168,6 +190,11 @@ func TestSettingsModuleEmbedded(t *testing.T) {
 		"settings-size",
 		"aria-pressed",
 		"onSize",
+		// Theme control (PR 5): a native, labelled <select> listing the curated
+		// themes, wired to the onTheme callback and kept in sync by sync().
+		"settings-theme",
+		`createElement("select")`,
+		"onTheme",
 		"Reset",
 		"onOutsidePointer",
 		`"Escape"`,

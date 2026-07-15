@@ -15,8 +15,45 @@ const CSS = `
      data-size attribute resizes the whole bar coherently. The 8px corner
      offset above stays fixed so the bar hugs the same corner at every size. */
   --mq-scale: 1;
+  /* --mq-bg/-fg/-border/-chip-bg are the bar's chrome palette; every themable
+     surface (bar, menu, toggle, switch, settings panel) reads them, so a theme
+     is just a new value set. The base :host values are the default theme's
+     light look; the dark-scheme override below completes the default. Curated
+     themes set all four with higher specificity, so they win over the scheme
+     media query and stay scheme-independent. The branch chip is deliberately
+     excluded — it keeps its hash color and its own contrast guarantee. */
+  --mq-bg: #f5f5f4;
+  --mq-fg: #1c1c1c;
+  --mq-border: #d0d0ce;
+  --mq-chip-bg: rgba(0, 0, 0, 0.07);
   font: 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   font-size: calc(12px * var(--mq-scale, 1));
+}
+@media (prefers-color-scheme: dark) {
+  :host {
+    --mq-bg: #262626;
+    --mq-fg: #ededed;
+    --mq-border: #4d4d4d;
+    --mq-chip-bg: rgba(255, 255, 255, 0.12);
+  }
+}
+:host([data-theme="midnight"]) {
+  --mq-bg: #0f172a;
+  --mq-fg: #e2e8f0;
+  --mq-border: #334155;
+  --mq-chip-bg: #1e293b;
+}
+:host([data-theme="sand"]) {
+  --mq-bg: #f4ecd8;
+  --mq-fg: #3a2e1a;
+  --mq-border: #d9cdb3;
+  --mq-chip-bg: #e6d9ba;
+}
+:host([data-theme="forest"]) {
+  --mq-bg: #0f1f17;
+  --mq-fg: #d6e8dc;
+  --mq-border: #2d4a3a;
+  --mq-chip-bg: #1a3226;
 }
 :host([data-size="small"]) {
   --mq-scale: 0.85;
@@ -66,9 +103,9 @@ const CSS = `
   height: calc(28px * var(--mq-scale, 1));
   padding: 0 calc(8px * var(--mq-scale, 1));
   border-radius: calc(8px * var(--mq-scale, 1));
-  background: #f5f5f4;
-  color: #1c1c1c;
-  border: 1px solid #d0d0ce;
+  background: var(--mq-bg);
+  color: var(--mq-fg);
+  border: 1px solid var(--mq-border);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
 }
 .chip {
@@ -78,7 +115,7 @@ const CSS = `
   padding: 0 calc(7px * var(--mq-scale, 1));
   border-radius: calc(9px * var(--mq-scale, 1));
   white-space: nowrap;
-  background: rgba(0, 0, 0, 0.07);
+  background: var(--mq-chip-bg);
 }
 a.chip {
   color: inherit;
@@ -127,9 +164,9 @@ a.chip {
   width: calc(20px * var(--mq-scale, 1));
   height: calc(20px * var(--mq-scale, 1));
   padding: 0;
-  border: 1px solid #d0d0ce;
+  border: 1px solid var(--mq-border);
   border-radius: 50%;
-  background: #f5f5f4;
+  background: var(--mq-bg);
   color: inherit;
   font: inherit;
   cursor: pointer;
@@ -147,15 +184,6 @@ a:focus-visible {
   outline-offset: 2px;
 }
 @media (prefers-color-scheme: dark) {
-  .bar,
-  .toggle {
-    background: #262626;
-    color: #ededed;
-    border-color: #4d4d4d;
-  }
-  .chip {
-    background: rgba(255, 255, 255, 0.12);
-  }
   .pr.skeleton {
     background-image: linear-gradient(
       100deg,
@@ -194,7 +222,7 @@ a:focus-visible {
   padding: 0 calc(7px * var(--mq-scale, 1));
   border-radius: calc(9px * var(--mq-scale, 1));
   border: 1px solid transparent;
-  background: rgba(0, 0, 0, 0.07);
+  background: var(--mq-chip-bg);
   color: inherit;
   font: inherit;
   cursor: pointer;
@@ -216,9 +244,9 @@ a:focus-visible {
   padding: calc(4px * var(--mq-scale, 1));
   margin: 0;
   border-radius: calc(8px * var(--mq-scale, 1));
-  background: #f5f5f4;
-  color: #1c1c1c;
-  border: 1px solid #d0d0ce;
+  background: var(--mq-bg);
+  color: var(--mq-fg);
+  border: 1px solid var(--mq-border);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 :host([data-position$="-right"]) .menu {
@@ -292,14 +320,6 @@ a:focus-visible {
   }
 }
 @media (prefers-color-scheme: dark) {
-  .menu {
-    background: #262626;
-    color: #ededed;
-    border-color: #4d4d4d;
-  }
-  .switch {
-    background: rgba(255, 255, 255, 0.12);
-  }
   .menu button:hover,
   .menu button:focus-visible {
     background: rgba(255, 255, 255, 0.16);
@@ -450,6 +470,7 @@ class MarqueeBar extends HTMLElement {
       getEffective: () => this.#effective(),
       onPosition: (position) => this.#applyPref({ position }),
       onSize: (size) => this.#applyPref({ size }),
+      onTheme: (theme) => this.#applyPref({ theme }),
       onReset: () => this.#resetPrefs(),
     });
     this.#toggle.addEventListener("click", () => this.#onToggle());
@@ -511,6 +532,7 @@ class MarqueeBar extends HTMLElement {
     const effective = this.#effective();
     this.setAttribute("data-position", effective.position);
     this.setAttribute("data-size", effective.size);
+    this.setAttribute("data-theme", effective.theme);
     this.#settings.sync();
     const colors = branchColors(status.branch, this.#dark.matches);
     this.#branch.textContent = status.branch;
@@ -533,7 +555,7 @@ class MarqueeBar extends HTMLElement {
   // layers fail open: a bad value anywhere yields a valid effective pref.
   #effective() {
     const status = this.#status || {};
-    const defaults = merge(DEFAULTS, { position: status.position, size: status.size });
+    const defaults = merge(DEFAULTS, { position: status.position, size: status.size, theme: status.theme });
     return merge(defaults, this.#storedPrefs);
   }
 

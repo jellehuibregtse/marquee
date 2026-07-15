@@ -38,6 +38,9 @@ func TestParseAttachArgsDefaults(t *testing.T) {
 	if opts.size != "medium" {
 		t.Errorf("size = %q, want medium", opts.size)
 	}
+	if opts.theme != "default" {
+		t.Errorf("theme = %q, want default", opts.theme)
+	}
 	if opts.upstreamURL == nil || opts.upstreamURL.Host != "localhost:3100" {
 		t.Errorf("upstreamURL = %v, want host localhost:3100", opts.upstreamURL)
 	}
@@ -121,6 +124,37 @@ func TestParseAttachArgsInvalidSize(t *testing.T) {
 	for _, size := range []string{"small", "medium", "large"} {
 		if !strings.Contains(out, size) {
 			t.Errorf("error message does not list %q: %q", size, out)
+		}
+	}
+}
+
+func TestParseAttachArgsThemes(t *testing.T) {
+	for _, theme := range []string{"default", "midnight", "sand", "forest"} {
+		opts, err := parseAttachArgs("marquee attach",
+			[]string{"--upstream", "http://localhost:3100", "--theme", theme}, io.Discard)
+		if err != nil {
+			t.Fatalf("parseAttachArgs(--theme %s): %v", theme, err)
+		}
+		if opts.theme != theme {
+			t.Errorf("theme = %q, want %q", opts.theme, theme)
+		}
+	}
+}
+
+func TestParseAttachArgsInvalidTheme(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseAttachArgs("marquee attach",
+		[]string{"--upstream", "http://localhost:3100", "--theme", "neon"}, &buf)
+	if err == nil {
+		t.Fatal("parseAttachArgs accepted an invalid --theme")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "invalid --theme") {
+		t.Errorf("missing error message: %q", out)
+	}
+	for _, theme := range []string{"default", "midnight", "sand", "forest"} {
+		if !strings.Contains(out, theme) {
+			t.Errorf("error message does not list %q: %q", theme, out)
 		}
 	}
 }

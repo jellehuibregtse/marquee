@@ -17,7 +17,17 @@
 - IP hygiene: fixtures synthetic, no employer material.
 - One task = one atomic PR; conventional commits; never reference AI tooling.
 - Reference spec: `docs/superpowers/specs/2026-07-15-bar-customization-design.md`.
-- Every UI-affecting PR includes before/after screenshots (real headless browser).
+- Every UI-affecting PR is verified live in a real headless browser (see Testing strategy).
+
+## Testing strategy (READ THIS — supersedes any per-task "e2e_test.go" wording)
+
+marquee is **Go-stdlib-only**, so there is **no committed browser test** for the injected bar JS and **no `internal/bar/embed_test.go` (markers; browser check via MCP — see Testing strategy)** (it never existed; the only Go e2e harness, `e2e/e2e_test.go`, is HTTP-only and cannot measure DOM layout). A real DOM/layout test needs CDP-over-websocket → a forbidden dependency. So, for every task below, "e2e"/"browser test" means this three-part strategy, NOT a new Go browser test:
+
+1. **Go tests (real CI coverage)** for the Go side: `cmd/marquee/options_test.go` (flag parsing/validation) and `internal/status/status_test.go` (payload fields).
+2. **`internal/bar/embed_test.go` structural markers** — assert the expected strings/behaviors are present in the embedded JS asset, pinning them into `go test`.
+3. **Live verification in a real headless browser via the Playwright/chrome-devtools MCP** — reproduce fail-first on `main` where applicable, confirm the fix passes, capture bounding-box/interaction measurements and screenshots (to scratchpad; report them in the PR body as measurements + description, per the #29/#30/#34 precedent). This is per-PR verification, not committed CI.
+
+Do not attempt to create or extend `internal/bar/embed_test.go` (markers; browser check via MCP — see Testing strategy).
 
 ## File map
 
@@ -29,13 +39,13 @@
 - `cmd/marquee/options.go` — new flags `--size`, `--theme`, `--pills`; extend `--position` validation.
 - `internal/status/status.go` — new payload fields: `size`, `theme`, `pills` (ordered), keep `position`.
 - `cmd/marquee/main.go`, `cmd/marquee/attach.go` — wire new opts into the status deps.
-- Tests: `cmd/marquee/options_test.go`, `internal/status/status_test.go`, `internal/bar/e2e_test.go`.
+- Tests: `cmd/marquee/options_test.go`, `internal/status/status_test.go`, `internal/bar/embed_test.go` (markers; browser check via MCP — see Testing strategy).
 
 ---
 
 ### Task 1 (PR 1) — fix: reserve PR-chip space (layout shift)
 
-**Files:** Modify `internal/bar/bar.js` (CSS + `#render`); Test `internal/bar/e2e_test.go`.
+**Files:** Modify `internal/bar/bar.js` (CSS + `#render`); Test `internal/bar/embed_test.go` (markers; browser check via MCP — see Testing strategy).
 
 **Problem:** `.pr` chip is `hidden` until the async GH poll resolves, then appears and shoves the switcher sideways.
 
@@ -51,7 +61,7 @@
 
 ### Task 2 (PR 2) — feat: four-corner `--position`
 
-**Files:** Modify `cmd/marquee/options.go`, `internal/status/status.go` (already carries `position`), `internal/bar/bar.js` (CSS + anchor logic); Test `cmd/marquee/options_test.go`, `internal/bar/e2e_test.go`.
+**Files:** Modify `cmd/marquee/options.go`, `internal/status/status.go` (already carries `position`), `internal/bar/bar.js` (CSS + anchor logic); Test `cmd/marquee/options_test.go`, `internal/bar/embed_test.go` (markers; browser check via MCP — see Testing strategy).
 
 **Interfaces produced:** flag accepts `bottom-left|bottom-right|top-left|top-right`; status `position` carries the same string; bar sets `data-position` (replacing the current top/bottom-only attr).
 
@@ -69,7 +79,7 @@
 
 This is the architecture PR. **Use the `improve-codebase-architecture` skill** to draw the `prefs.js` / `settings.js` / `bar.js` seams cleanly before/while implementing.
 
-**Files:** Create `internal/bar/prefs.js`, `internal/bar/settings.js`; modify `internal/bar/bar.js`, `internal/bar/embed.go`, proxy asset serving; Test `internal/bar/e2e_test.go`, `internal/bar/embed_test.go`.
+**Files:** Create `internal/bar/prefs.js`, `internal/bar/settings.js`; modify `internal/bar/bar.js`, `internal/bar/embed.go`, proxy asset serving; Test `internal/bar/embed_test.go` (markers; browser check via MCP — see Testing strategy), `internal/bar/embed_test.go`.
 
 **`prefs.js` interface (pure, produced for later tasks):**
 - `DEFAULTS` — `{ position, size, theme, pills }` shape mirror of status defaults.

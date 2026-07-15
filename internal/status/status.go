@@ -2,6 +2,7 @@ package status
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 
 	"github.com/jellehuibregtse/marquee/internal/bar"
@@ -38,15 +39,33 @@ type payload struct {
 	Position  string                  `json:"position"`
 }
 
-var barScript, _ = bar.Assets.ReadFile("bar.js")
-
-// Register wires GET /__marquee/status and GET /__marquee/bar.js onto
-// the guarded mux, so both endpoints inherit the Host allowlist and
-// Cache-Control: no-store guards by construction. The GET method
-// patterns make the mux answer other methods with 405.
+// Register wires GET /__marquee/status and a GET route per embedded bar module
+// (bar.js, prefs.js, settings.js, …) onto the guarded mux, so every endpoint
+// inherits the Host allowlist and Cache-Control: no-store guards by
+// construction. The GET method patterns make the mux answer other methods with
+// 405. Serving assets by their embedded file name means adding a module is just
+// dropping a *.js file into internal/bar, no route wiring here.
 func Register(mux *proxy.InternalMux, deps Deps) {
 	mux.Handle("GET /__marquee/status", statusHandler(deps))
-	mux.Handle("GET /__marquee/bar.js", http.HandlerFunc(serveBarScript))
+	registerAssets(mux)
+}
+
+func registerAssets(mux *proxy.InternalMux) {
+	names, _ := fs.Glob(bar.Assets, "*.js")
+	for _, name := range names {
+		data, err := bar.Assets.ReadFile(name)
+		if err != nil {
+			continue
+		}
+		mux.Handle("GET /__marquee/"+name, serveJS(data))
+	}
+}
+
+func serveJS(data []byte) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		_, _ = w.Write(data)
+	})
 }
 
 func statusHandler(deps Deps) http.Handler {
@@ -77,9 +96,4 @@ func statusHandler(deps Deps) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(body)
 	})
-}
-
-func serveBarScript(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	_, _ = w.Write(barScript)
 }

@@ -516,6 +516,15 @@ user:
   the restart before the revert spawns, so a failed switch never orphans a
   process.
 
+Known limitation (accepted): a switch's managed window suppresses child-exit
+shutdown until it closes. If a just-health-checked child dies in the sub-
+millisecond tail between passing the health probe and the window closing on an
+otherwise **successful** switch, that exit is suppressed and marquee keeps
+running with the child down (the proxy serves its unavailable page; the user
+can switch again or restart). The window is tiny and non-deterministic and the
+degradation is graceful, so this is left as-is rather than complicating the
+lifecycle guarantees that keep marquee alive across a failed switch.
+
 **Token lifecycle.** The token is 256 bits from `crypto/rand`, hex-encoded (no
 HTML-special characters, so it embeds without escaping), minted **once** at
 startup and constant for the process. It reaches the browser **only** through

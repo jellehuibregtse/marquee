@@ -41,6 +41,9 @@ func TestParseAttachArgsDefaults(t *testing.T) {
 	if opts.theme != "default" {
 		t.Errorf("theme = %q, want default", opts.theme)
 	}
+	if got := strings.Join(opts.pills, ","); got != "branch,dirty,worktree,pr" {
+		t.Errorf("pills = %q, want branch,dirty,worktree,pr", got)
+	}
 	if opts.upstreamURL == nil || opts.upstreamURL.Host != "localhost:3100" {
 		t.Errorf("upstreamURL = %v, want host localhost:3100", opts.upstreamURL)
 	}
@@ -155,6 +158,64 @@ func TestParseAttachArgsInvalidTheme(t *testing.T) {
 	for _, theme := range []string{"default", "midnight", "sand", "forest"} {
 		if !strings.Contains(out, theme) {
 			t.Errorf("error message does not list %q: %q", theme, out)
+		}
+	}
+}
+
+func TestParseAttachArgsPillsSubsetPreservesOrder(t *testing.T) {
+	opts, err := parseAttachArgs("marquee attach",
+		[]string{"--upstream", "http://localhost:3100", "--pills", "branch,pr"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseAttachArgs(--pills): %v", err)
+	}
+	if got := strings.Join(opts.pills, ","); got != "branch,pr" {
+		t.Errorf("pills = %q, want branch,pr", got)
+	}
+}
+
+func TestParseAttachArgsPillsEmptyHidesAll(t *testing.T) {
+	opts, err := parseAttachArgs("marquee attach",
+		[]string{"--upstream", "http://localhost:3100", "--pills", ""}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseAttachArgs(--pills \"\"): %v", err)
+	}
+	if len(opts.pills) != 0 {
+		t.Errorf("pills = %v, want empty", opts.pills)
+	}
+}
+
+func TestParseAttachArgsInvalidPill(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseAttachArgs("marquee attach",
+		[]string{"--upstream", "http://localhost:3100", "--pills", "branch,nope"}, &buf)
+	if err == nil {
+		t.Fatal("parseAttachArgs accepted an unknown pill")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "invalid --pills") {
+		t.Errorf("missing error message: %q", out)
+	}
+	for _, id := range []string{"branch", "dirty", "worktree", "pr"} {
+		if !strings.Contains(out, id) {
+			t.Errorf("error message does not list %q: %q", id, out)
+		}
+	}
+}
+
+func TestParseAttachArgsDuplicatePill(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseAttachArgs("marquee attach",
+		[]string{"--upstream", "http://localhost:3100", "--pills", "pr,pr"}, &buf)
+	if err == nil {
+		t.Fatal("parseAttachArgs accepted a duplicate pill")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "invalid --pills") {
+		t.Errorf("missing error message: %q", out)
+	}
+	for _, id := range []string{"branch", "dirty", "worktree", "pr"} {
+		if !strings.Contains(out, id) {
+			t.Errorf("error message does not list %q: %q", id, out)
 		}
 	}
 }

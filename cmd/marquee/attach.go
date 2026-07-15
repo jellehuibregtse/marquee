@@ -76,6 +76,7 @@ func runAttach(args []string) int {
 		Position:   opts.position,
 		Size:       opts.size,
 		Theme:      opts.theme,
+		Pills:      opts.pills,
 	})
 
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}

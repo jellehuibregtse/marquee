@@ -124,7 +124,7 @@ func TestStatusJSONShape(t *testing.T) {
 	}
 
 	doc := assertKeys(t, "status", rec.Body.Bytes(),
-		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size", "theme")
+		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size", "theme", "pills")
 	assertKeys(t, "worktree", doc["worktree"], "path", "slug", "isMain")
 	assertKeys(t, "child", doc["child"], "state")
 
@@ -177,7 +177,7 @@ func TestStatusIncludesPR(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	doc := assertKeys(t, "status", rec.Body.Bytes(),
-		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size", "theme")
+		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size", "theme", "pills")
 	assertKeys(t, "pr", doc["pr"], "number", "title", "url")
 	var got ghinfo.PR
 	if err := json.Unmarshal(doc["pr"], &got); err != nil || got != *pr {
@@ -236,6 +236,42 @@ func TestStatusReportsTheme(t *testing.T) {
 	}
 	if string(doc["theme"]) != `"midnight"` {
 		t.Errorf("theme = %s, want \"midnight\"", doc["theme"])
+	}
+}
+
+func TestStatusReportsPillsInOrder(t *testing.T) {
+	deps, _ := fixtureDeps(t, func() *ghinfo.PR { return nil })
+	deps.Pills = []string{"branch", "pr"}
+	mux := newMux(t, deps)
+
+	rec := get(mux, "http://localhost/__marquee/status")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if string(doc["pills"]) != `["branch","pr"]` {
+		t.Errorf("pills = %s, want [\"branch\",\"pr\"]", doc["pills"])
+	}
+}
+
+func TestStatusReportsEmptyPillsAsArray(t *testing.T) {
+	deps, _ := fixtureDeps(t, func() *ghinfo.PR { return nil })
+	deps.Pills = []string{}
+	mux := newMux(t, deps)
+
+	rec := get(mux, "http://localhost/__marquee/status")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if string(doc["pills"]) != `[]` {
+		t.Errorf("pills = %s, want []", doc["pills"])
 	}
 }
 

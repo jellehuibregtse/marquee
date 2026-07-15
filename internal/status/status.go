@@ -29,6 +29,11 @@ type Deps struct {
 	// "forest"); the bar script reads it from the status payload and sets
 	// data-theme. An unknown value fails open to the default theme in the bar.
 	Theme string
+	// Pills is the ordered set of info pills the bar renders ("branch",
+	// "dirty", "worktree", "pr"). List order is render order and an omitted id
+	// is hidden; the bar overlays any stored panel order on top and fails open
+	// to its own default set for a missing or invalid value.
+	Pills []string
 }
 
 type child struct {
@@ -46,6 +51,7 @@ type payload struct {
 	Position  string                  `json:"position"`
 	Size      string                  `json:"size"`
 	Theme     string                  `json:"theme"`
+	Pills     []string                `json:"pills"`
 }
 
 // Register wires GET /__marquee/status and a GET route per embedded bar module
@@ -89,9 +95,13 @@ func statusHandler(deps Deps) http.Handler {
 			Position:  deps.Position,
 			Size:      deps.Size,
 			Theme:     deps.Theme,
+			Pills:     deps.Pills,
 		}
 		if p.Worktrees == nil {
 			p.Worktrees = []gitinfo.Worktree{}
+		}
+		if p.Pills == nil {
+			p.Pills = []string{}
 		}
 		if deps.PR != nil {
 			p.PR = deps.PR()

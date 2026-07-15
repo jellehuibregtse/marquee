@@ -94,6 +94,18 @@ func TestBarScriptEmbedded(t *testing.T) {
 		`aria-label="Bar settings"`,
 		"createSettingsPanel",
 		"localStore",
+		// Pill show/hide + reorder (PR 6): the bar reads the ordered pill list
+		// from status, iterates the shared PILL_IDS table, gates each pill on
+		// membership, and lays the elements out in order before the controls.
+		"status.pills",
+		"PILL_IDS",
+		"#orderPills",
+		"insertBefore",
+		// Control-affordance polish (PR 6): the worktree switch gains a solid
+		// border and a ▾ caret so it reads as an operable control, not a chip.
+		"switch-caret",
+		"▾",
+		"border: 1px solid var(--mq-border)",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("bar.js missing expected marker %q", marker)
@@ -145,6 +157,12 @@ func TestPrefsModuleEmbedded(t *testing.T) {
 		`theme: "default"`,
 		"midnight",
 		"forest",
+		// Pill show/hide + reorder (PR 6): the shared pill table, the pills
+		// default (all four in order), and the array validator that drops an
+		// invalid stored value so the default wins.
+		"export const PILL_IDS",
+		`pills: ["branch", "dirty", "worktree", "pr"]`,
+		"Array.isArray",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("prefs.js missing expected marker %q", marker)
@@ -202,6 +220,15 @@ func TestSettingsModuleEmbedded(t *testing.T) {
 		".settings-menu",
 		// The panel entrance animation is disabled under reduced motion.
 		"prefers-reduced-motion",
+		// Pills section (PR 6): a per-id list of checkbox rows (shown/hidden)
+		// with ↑/↓ reorder buttons, wired to the onPills callback and rebuilt by
+		// syncPills only when the effective order or visibility changed.
+		"onPills",
+		"settings-pill",
+		`type = "checkbox"`,
+		"↑",
+		"↓",
+		"syncPills",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("settings.js missing expected marker %q", marker)

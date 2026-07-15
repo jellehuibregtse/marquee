@@ -1,4 +1,4 @@
-import { DEFAULTS, merge, validate, load, save, reset } from "./prefs.js";
+import { DEFAULTS, PILL_IDS, merge, validate, load, save, reset } from "./prefs.js";
 import { PANEL_CSS, createSettingsPanel } from "./settings.js";
 
 const STORAGE_KEY = "marquee-bar-collapsed";
@@ -214,6 +214,9 @@ a:focus-visible {
   position: relative;
   display: inline-flex;
 }
+/* The switch and the gear are the bar's two controls; unlike the read-only
+   info pills they carry a solid border and a glyph (the ▾ caret here, the ⚙ on
+   the gear) so they visibly read as operable buttons rather than status chips. */
 .switch {
   display: inline-flex;
   align-items: center;
@@ -221,7 +224,7 @@ a:focus-visible {
   height: calc(18px * var(--mq-scale, 1));
   padding: 0 calc(7px * var(--mq-scale, 1));
   border-radius: calc(9px * var(--mq-scale, 1));
-  border: 1px solid transparent;
+  border: 1px solid var(--mq-border);
   background: var(--mq-chip-bg);
   color: inherit;
   font: inherit;
@@ -231,6 +234,11 @@ a:focus-visible {
 .switch:focus-visible {
   outline: 2px solid #3b82f6;
   outline-offset: 2px;
+}
+.switch-caret {
+  font-size: calc(9px * var(--mq-scale, 1));
+  line-height: 1;
+  opacity: 0.75;
 }
 .menu {
   position: absolute;
@@ -338,6 +346,7 @@ const TEMPLATE = `
     <span class="switcher" hidden>
       <button type="button" class="switch" aria-haspopup="menu" aria-expanded="false" aria-label="Switch worktree">
         <span class="switch-label"></span>
+        <span class="switch-caret" aria-hidden="true">▾</span>
       </button>
       <div class="menu" role="menu" aria-label="Worktrees" hidden></div>
     </span>
@@ -471,6 +480,7 @@ class MarqueeBar extends HTMLElement {
       onPosition: (position) => this.#applyPref({ position }),
       onSize: (size) => this.#applyPref({ size }),
       onTheme: (theme) => this.#applyPref({ theme }),
+      onPills: (pills) => this.#applyPref({ pills }),
       onReset: () => this.#resetPrefs(),
     });
     this.#toggle.addEventListener("click", () => this.#onToggle());
@@ -534,18 +544,28 @@ class MarqueeBar extends HTMLElement {
     this.setAttribute("data-size", effective.size);
     this.setAttribute("data-theme", effective.theme);
     this.#settings.sync();
+    // A pill shows only if it is both in the effective order AND its own
+    // condition says show; the two rules compose so hiding a pill via the list
+    // never overrides its self-hide (worktree on main, pr absent, dirty clean).
+    const shown = new Set(effective.pills);
     const colors = branchColors(status.branch, this.#dark.matches);
+    this.#branch.hidden = !shown.has("branch");
     this.#branch.textContent = status.branch;
     this.#branch.style.background = colors.background;
     this.#branch.style.color = colors.text;
-    this.#dirty.hidden = !status.dirty;
+    this.#dirty.hidden = !(shown.has("dirty") && status.dirty);
     const worktree = status.worktree;
-    const showWorktree = Boolean(worktree && worktree.slug && worktree.isMain === false);
+    const showWorktree = shown.has("worktree") && Boolean(worktree && worktree.slug && worktree.isMain === false);
     this.#worktree.hidden = !showWorktree;
     if (showWorktree) this.#worktree.textContent = worktree.slug;
-    const pr = status.pr;
-    const prHref = pr && pr.url ? safeHttpUrl(pr.url) : null;
-    this.#renderPr(pr, prHref);
+    if (shown.has("pr")) {
+      const pr = status.pr;
+      const prHref = pr && pr.url ? safeHttpUrl(pr.url) : null;
+      this.#renderPr(pr, prHref);
+    } else {
+      this.#hidePr();
+    }
+    this.#orderPills(effective.pills);
     this.#renderSwitcher(status);
     this.#toggle.style.background = this.#collapsed ? colors.background : "";
   }
@@ -555,7 +575,12 @@ class MarqueeBar extends HTMLElement {
   // layers fail open: a bad value anywhere yields a valid effective pref.
   #effective() {
     const status = this.#status || {};
-    const defaults = merge(DEFAULTS, { position: status.position, size: status.size, theme: status.theme });
+    const defaults = merge(DEFAULTS, {
+      position: status.position,
+      size: status.size,
+      theme: status.theme,
+      pills: status.pills,
+    });
     return merge(defaults, this.#storedPrefs);
   }
 
@@ -603,6 +628,13 @@ class MarqueeBar extends HTMLElement {
       this.#prText.textContent = "";
       return;
     }
+    this.#hidePr();
+  }
+
+  // #hidePr collapses the PR slot and clears every state it can carry, so a PR
+  // that is genuinely absent — or a pill list that omits "pr" — leaves no
+  // reserved width, skeleton, or stale link behind.
+  #hidePr() {
     this.#pr.hidden = true;
     this.#pr.classList.remove("skeleton");
     this.#pr.removeAttribute("aria-hidden");
@@ -610,6 +642,24 @@ class MarqueeBar extends HTMLElement {
     this.#pr.removeAttribute("href");
     this.#pr.removeAttribute("title");
     this.#prText.textContent = "";
+  }
+
+  // #orderPills lays the four pill elements out in the effective order within
+  // .bar, ahead of the fixed controls (switcher, gear, collapse toggle). Ids
+  // absent from the list trail the ordered ones; they are already hidden by
+  // #render, so their position is inert but kept deterministic.
+  #orderPills(order) {
+    const els = {
+      branch: this.#branch,
+      dirty: this.#dirty,
+      worktree: this.#worktree,
+      pr: this.#pr,
+    };
+    const full = [...order, ...PILL_IDS.filter((id) => !order.includes(id))];
+    for (const id of full) {
+      const el = els[id];
+      if (el) this.#bar.insertBefore(el, this.#switcher);
+    }
   }
 
   #prSlotState(prHref) {

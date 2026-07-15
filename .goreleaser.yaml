@@ -56,6 +56,8 @@ homebrew_casks:
     homepage: https://github.com/jellehuibregtse/marquee
     description: Local reverse proxy that shows branch, worktree, and PR info in a bar injected into your dev server's HTML
     skip_upload: false
+    # Keep the tap commit conventional (root CLAUDE.md), not goreleaser's default.
+    commit_msg_template: "chore: Update {{ .ProjectName }} cask to {{ .Tag }}"
     hooks:
       post:
         install: |

@@ -21,8 +21,17 @@ func TestBarScriptEmbedded(t *testing.T) {
 		`role="status"`,
 		"/__marquee/status",
 		`rel="noreferrer"`,
+		// Four-corner positioning (PR 2): the bar carries the corner on a
+		// data-position attribute and CSS anchors each corner; the worktree
+		// menu flips its horizontal/vertical anchor so it never clips.
 		"status.position",
-		`:host([position="top"])`,
+		"data-position",
+		`:host([data-position="bottom-left"])`,
+		`:host([data-position="bottom-right"])`,
+		`:host([data-position="top-left"])`,
+		`:host([data-position="top-right"])`,
+		`:host([data-position$="-right"]) .menu`,
+		`:host([data-position^="top-"]) .menu`,
 		"safeHttpUrl",
 		`url.protocol === "https:"`,
 		// Worktree switcher (M4-T2): the POST target, the token header echoed

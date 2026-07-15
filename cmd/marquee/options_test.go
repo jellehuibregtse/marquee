@@ -15,8 +15,8 @@ func TestParseArgsDefaults(t *testing.T) {
 	if opts.listen != "127.0.0.1:3000" {
 		t.Errorf("listen = %q, want 127.0.0.1:3000", opts.listen)
 	}
-	if opts.position != "bottom" {
-		t.Errorf("position = %q, want bottom", opts.position)
+	if opts.position != "bottom-left" {
+		t.Errorf("position = %q, want bottom-left", opts.position)
 	}
 	if opts.noOpen || opts.quiet || opts.unsafeListen {
 		t.Errorf("bool flags default true: %+v", opts)
@@ -43,12 +43,12 @@ func TestParseArgsAllowHostRepeatable(t *testing.T) {
 
 func TestParseArgsFlagsCaptured(t *testing.T) {
 	opts, err := parseArgs("marquee",
-		[]string{"--position", "top", "--quiet", "--no-open", "--unsafe-listen",
+		[]string{"--position", "top-left", "--quiet", "--no-open", "--unsafe-listen",
 			"--listen", "0.0.0.0:3000", "--", "bin/dev", "arg"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
 	}
-	if opts.position != "top" || !opts.quiet || !opts.noOpen || !opts.unsafeListen {
+	if opts.position != "top-left" || !opts.quiet || !opts.noOpen || !opts.unsafeListen {
 		t.Errorf("flags not captured: %+v", opts)
 	}
 	if opts.listen != "0.0.0.0:3000" {
@@ -59,14 +59,32 @@ func TestParseArgsFlagsCaptured(t *testing.T) {
 	}
 }
 
+func TestParseArgsPositionCorners(t *testing.T) {
+	for _, corner := range []string{"bottom-left", "bottom-right", "top-left", "top-right"} {
+		opts, err := parseArgs("marquee", []string{"--position", corner, "--", "bin/dev"}, io.Discard)
+		if err != nil {
+			t.Fatalf("parseArgs(--position %s): %v", corner, err)
+		}
+		if opts.position != corner {
+			t.Errorf("position = %q, want %q", opts.position, corner)
+		}
+	}
+}
+
 func TestParseArgsInvalidPosition(t *testing.T) {
 	var buf bytes.Buffer
 	_, err := parseArgs("marquee", []string{"--position", "sideways", "--", "bin/dev"}, &buf)
 	if err == nil {
 		t.Fatal("parseArgs accepted an invalid --position")
 	}
-	if !strings.Contains(buf.String(), "invalid --position") {
-		t.Errorf("missing error message: %q", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "invalid --position") {
+		t.Errorf("missing error message: %q", out)
+	}
+	for _, corner := range []string{"bottom-left", "bottom-right", "top-left", "top-right"} {
+		if !strings.Contains(out, corner) {
+			t.Errorf("error message does not list %q: %q", corner, out)
+		}
 	}
 }
 

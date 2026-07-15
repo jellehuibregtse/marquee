@@ -9,9 +9,29 @@ const CSS = `
   z-index: 2147483000;
   font: 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 }
-:host([position="top"]) {
-  bottom: auto;
+:host([data-position="bottom-left"]) {
+  top: auto;
+  bottom: 8px;
+  left: 8px;
+  right: auto;
+}
+:host([data-position="bottom-right"]) {
+  top: auto;
+  bottom: 8px;
+  left: auto;
+  right: 8px;
+}
+:host([data-position="top-left"]) {
   top: 8px;
+  bottom: auto;
+  left: 8px;
+  right: auto;
+}
+:host([data-position="top-right"]) {
+  top: 8px;
+  bottom: auto;
+  left: auto;
+  right: 8px;
 }
 [hidden] {
   display: none !important;
@@ -169,7 +189,9 @@ a:focus-visible {
 .menu {
   position: absolute;
   left: 0;
+  right: auto;
   bottom: calc(100% + 6px);
+  top: auto;
   min-width: 160px;
   max-height: 240px;
   overflow-y: auto;
@@ -181,7 +203,11 @@ a:focus-visible {
   border: 1px solid #d0d0ce;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
-:host([position="top"]) .menu {
+:host([data-position$="-right"]) .menu {
+  left: auto;
+  right: 0;
+}
+:host([data-position^="top-"]) .menu {
   bottom: auto;
   top: calc(100% + 6px);
 }
@@ -327,6 +353,14 @@ function textSpan(text) {
   return span;
 }
 
+const POSITIONS = ["bottom-left", "bottom-right", "top-left", "top-right"];
+
+// Fail-open: a missing or unrecognized position falls back to bottom-left,
+// matching the CLI default, so a bad payload never leaves the bar unanchored.
+function positionOrDefault(value) {
+  return POSITIONS.includes(value) ? value : "bottom-left";
+}
+
 function safeHttpUrl(value) {
   try {
     const url = new URL(value, location.href);
@@ -430,11 +464,7 @@ class MarqueeBar extends HTMLElement {
       return;
     }
     this.#wrap.hidden = false;
-    if (status.position === "top") {
-      this.setAttribute("position", "top");
-    } else {
-      this.removeAttribute("position");
-    }
+    this.setAttribute("data-position", positionOrDefault(status.position));
     const colors = branchColors(status.branch, this.#dark.matches);
     this.#branch.textContent = status.branch;
     this.#branch.style.background = colors.background;

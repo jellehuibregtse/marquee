@@ -32,8 +32,8 @@ func TestParseAttachArgsDefaults(t *testing.T) {
 	if opts.listen != "127.0.0.1:3000" {
 		t.Errorf("listen = %q, want 127.0.0.1:3000", opts.listen)
 	}
-	if opts.position != "bottom" {
-		t.Errorf("position = %q, want bottom", opts.position)
+	if opts.position != "bottom-left" {
+		t.Errorf("position = %q, want bottom-left", opts.position)
 	}
 	if opts.upstreamURL == nil || opts.upstreamURL.Host != "localhost:3100" {
 		t.Errorf("upstreamURL = %v, want host localhost:3100", opts.upstreamURL)
@@ -43,13 +43,13 @@ func TestParseAttachArgsDefaults(t *testing.T) {
 func TestParseAttachArgsFlagsCaptured(t *testing.T) {
 	opts, err := parseAttachArgs("marquee attach", []string{
 		"--upstream", "http://127.0.0.1:9999", "--listen", "localhost:4000",
-		"--position", "top", "--quiet", "--no-open", "--unsafe-listen",
+		"--position", "top-right", "--quiet", "--no-open", "--unsafe-listen",
 		"--allow-host", "a.test", "--allow-host", "b.test",
 	}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseAttachArgs: %v", err)
 	}
-	if opts.listen != "localhost:4000" || opts.position != "top" {
+	if opts.listen != "localhost:4000" || opts.position != "top-right" {
 		t.Errorf("flags not captured: %+v", opts)
 	}
 	if !opts.quiet || !opts.noOpen || !opts.unsafeListen {
@@ -57,6 +57,37 @@ func TestParseAttachArgsFlagsCaptured(t *testing.T) {
 	}
 	if strings.Join(opts.allowHosts, ",") != "a.test,b.test" {
 		t.Errorf("allowHosts = %v", opts.allowHosts)
+	}
+}
+
+func TestParseAttachArgsPositionCorners(t *testing.T) {
+	for _, corner := range []string{"bottom-left", "bottom-right", "top-left", "top-right"} {
+		opts, err := parseAttachArgs("marquee attach",
+			[]string{"--upstream", "http://localhost:3100", "--position", corner}, io.Discard)
+		if err != nil {
+			t.Fatalf("parseAttachArgs(--position %s): %v", corner, err)
+		}
+		if opts.position != corner {
+			t.Errorf("position = %q, want %q", opts.position, corner)
+		}
+	}
+}
+
+func TestParseAttachArgsInvalidPosition(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseAttachArgs("marquee attach",
+		[]string{"--upstream", "http://localhost:3100", "--position", "sideways"}, &buf)
+	if err == nil {
+		t.Fatal("parseAttachArgs accepted an invalid --position")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "invalid --position") {
+		t.Errorf("missing error message: %q", out)
+	}
+	for _, corner := range []string{"bottom-left", "bottom-right", "top-left", "top-right"} {
+		if !strings.Contains(out, corner) {
+			t.Errorf("error message does not list %q: %q", corner, out)
+		}
 	}
 }
 

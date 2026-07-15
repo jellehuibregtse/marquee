@@ -16,6 +16,21 @@ import (
 // written; run turns it into exit code 2 without printing anything more.
 var errUsage = errors.New("usage error")
 
+// positionUsage documents the four corners --position accepts; validPosition
+// enforces them and validPositions renders them for the error message.
+const positionUsage = "where the bar renders: bottom-left, bottom-right, top-left, or top-right"
+
+func validPosition(p string) bool {
+	switch p {
+	case "bottom-left", "bottom-right", "top-left", "top-right":
+		return true
+	default:
+		return false
+	}
+}
+
+const validPositions = "bottom-left, bottom-right, top-left, top-right"
+
 type options struct {
 	listen       string
 	internalPort int
@@ -47,7 +62,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	opts := &options{}
 	fs.StringVar(&opts.listen, "listen", "127.0.0.1:3000", "address to listen on (loopback only unless --unsafe-listen)")
 	fs.IntVar(&opts.internalPort, "internal-port", 0, "port the child binds to (0 picks a free port)")
-	fs.StringVar(&opts.position, "position", "bottom", "where the bar renders: top or bottom")
+	fs.StringVar(&opts.position, "position", "bottom-left", positionUsage)
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the app is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -65,8 +80,8 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	}
 	opts.command = fs.Args()
 
-	if opts.position != "top" && opts.position != "bottom" {
-		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be top or bottom\n", opts.position)
+	if !validPosition(opts.position) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be one of %s\n", opts.position, validPositions)
 		return nil, errUsage
 	}
 	if !opts.showVersion && len(opts.command) == 0 {
@@ -97,7 +112,7 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 	opts := &attachOptions{}
 	fs.StringVar(&opts.listen, "listen", "127.0.0.1:3000", "address to listen on (loopback only unless --unsafe-listen)")
 	fs.StringVar(&opts.upstream, "upstream", "", "upstream URL to proxy to, e.g. http://localhost:3100 (required, loopback only unless --unsafe-listen)")
-	fs.StringVar(&opts.position, "position", "bottom", "where the bar renders: top or bottom")
+	fs.StringVar(&opts.position, "position", "bottom-left", positionUsage)
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the upstream is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -114,8 +129,8 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 		_, _ = fmt.Fprintf(out, "marquee: attach takes no positional arguments (got %v); did you mean --upstream?\n", positional)
 		return nil, errUsage
 	}
-	if opts.position != "top" && opts.position != "bottom" {
-		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be top or bottom\n", opts.position)
+	if !validPosition(opts.position) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be one of %s\n", opts.position, validPositions)
 		return nil, errUsage
 	}
 	u, err := parseUpstream(opts.upstream)

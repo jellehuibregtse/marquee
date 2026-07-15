@@ -75,6 +75,7 @@ func runAttach(args []string) int {
 		ChildState: func() string { return "attached" },
 		Position:   opts.position,
 		Size:       opts.size,
+		Theme:      opts.theme,
 	})
 
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}

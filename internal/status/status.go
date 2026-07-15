@@ -25,6 +25,10 @@ type Deps struct {
 	// Size is the bar's size preset ("small", "medium", or "large"); the
 	// bar script reads it from the status payload and scales itself.
 	Size string
+	// Theme is the bar's color theme ("default", "midnight", "sand", or
+	// "forest"); the bar script reads it from the status payload and sets
+	// data-theme. An unknown value fails open to the default theme in the bar.
+	Theme string
 }
 
 type child struct {
@@ -41,6 +45,7 @@ type payload struct {
 	Child     child                   `json:"child"`
 	Position  string                  `json:"position"`
 	Size      string                  `json:"size"`
+	Theme     string                  `json:"theme"`
 }
 
 // Register wires GET /__marquee/status and a GET route per embedded bar module
@@ -83,6 +88,7 @@ func statusHandler(deps Deps) http.Handler {
 			Worktrees: snap.Worktrees,
 			Position:  deps.Position,
 			Size:      deps.Size,
+			Theme:     deps.Theme,
 		}
 		if p.Worktrees == nil {
 			p.Worktrees = []gitinfo.Worktree{}

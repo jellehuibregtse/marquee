@@ -9,12 +9,20 @@ export const POSITIONS = ["bottom-left", "bottom-right", "top-left", "top-right"
 
 export const SIZES = ["small", "medium", "large"];
 
+// THEMES is the curated palette set. "default" reproduces the bar's original
+// light/dark look (scheme-aware); the rest are fixed, scheme-independent
+// palettes. Each is contrast-verified: --mq-fg on --mq-bg and chip text on
+// --mq-chip-bg clear WCAG AA (≥4.5:1). The branch chip is never themed, so its
+// own hash-contrast guarantee is untouched.
+export const THEMES = ["default", "midnight", "sand", "forest"];
+
 // DEFAULTS mirrors the status defaults' shape. It is the fallback used when no
 // caller-supplied default and no stored value is valid. Later PRs extend it
-// with theme/pills; merge and validate stay generic over its keys.
+// with pills; merge and validate stay generic over its keys.
 export const DEFAULTS = {
   position: "bottom-left",
   size: "medium",
+  theme: "default",
 };
 
 // VALIDATORS gates each known key. A key counts as "known" only when it appears
@@ -23,6 +31,7 @@ export const DEFAULTS = {
 const VALIDATORS = {
   position: (value) => POSITIONS.includes(value),
   size: (value) => SIZES.includes(value),
+  theme: (value) => THEMES.includes(value),
 };
 
 const STORAGE_KEY = "marquee-bar-prefs";

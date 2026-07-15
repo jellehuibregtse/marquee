@@ -9,7 +9,7 @@
 // arrow-key selection works for free), focus is visible, and the entrance
 // animation is disabled under prefers-reduced-motion.
 
-import { POSITIONS, SIZES } from "./prefs.js";
+import { POSITIONS, SIZES, THEMES } from "./prefs.js";
 
 const POSITION_LABELS = {
   "bottom-left": "Bottom left",
@@ -34,6 +34,16 @@ const SIZE_ABBR = {
   large: "L",
 };
 
+// Theme is a native <select>: the curated set is a small, mutually exclusive
+// list where the option text names each theme, and a real select gives keyboard
+// and screen-reader support for free plus a visible current value.
+const THEME_LABELS = {
+  default: "Default",
+  midnight: "Midnight",
+  sand: "Sand",
+  forest: "Forest",
+};
+
 // PANEL_CSS is concatenated into bar.js's single shadow-root <style>. The panel
 // reuses the corner-aware anchoring from the worktree menu so it flips its
 // horizontal edge and vertical direction per corner and never clips off-screen.
@@ -49,9 +59,9 @@ export const PANEL_CSS = `
   width: 20px;
   height: 20px;
   padding: 0;
-  border: 1px solid #d0d0ce;
+  border: 1px solid var(--mq-border);
   border-radius: 50%;
-  background: #f5f5f4;
+  background: var(--mq-bg);
   color: inherit;
   font: inherit;
   line-height: 1;
@@ -74,9 +84,9 @@ export const PANEL_CSS = `
   padding: 8px;
   margin: 0;
   border-radius: 8px;
-  background: #f5f5f4;
-  color: #1c1c1c;
-  border: 1px solid #d0d0ce;
+  background: var(--mq-bg);
+  color: var(--mq-fg);
+  border: 1px solid var(--mq-border);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 :host([data-position$="-right"]) .settings-menu {
@@ -125,7 +135,7 @@ export const PANEL_CSS = `
 .settings-size {
   flex: 1;
   padding: 4px 0;
-  border: 1px solid #d0d0ce;
+  border: 1px solid var(--mq-border);
   border-radius: 5px;
   background: transparent;
   color: inherit;
@@ -146,11 +156,25 @@ export const PANEL_CSS = `
   color: #fff;
   font-weight: 600;
 }
+.settings-theme {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--mq-border);
+  border-radius: 5px;
+  background: var(--mq-bg);
+  color: var(--mq-fg);
+  font: inherit;
+  cursor: pointer;
+}
+.settings-theme:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
 .settings-reset {
   margin-top: 8px;
   width: 100%;
   padding: 5px 8px;
-  border: 1px solid #d0d0ce;
+  border: 1px solid var(--mq-border);
   border-radius: 5px;
   background: transparent;
   color: inherit;
@@ -182,26 +206,9 @@ export const PANEL_CSS = `
   }
 }
 @media (prefers-color-scheme: dark) {
-  .gear,
-  .settings-reset,
-  .settings-size {
-    background: #262626;
-    color: #ededed;
-    border-color: #4d4d4d;
-  }
-  .settings-menu {
-    background: #262626;
-    color: #ededed;
-    border-color: #4d4d4d;
-  }
   .settings-radio:hover,
   .settings-size:hover {
     background: rgba(255, 255, 255, 0.14);
-  }
-  .settings-size[aria-pressed="true"] {
-    background: #3b82f6;
-    border-color: #3b82f6;
-    color: #fff;
   }
   .settings-reset:hover,
   .settings-reset:focus-visible {
@@ -215,7 +222,7 @@ export const PANEL_CSS = `
 // bar.js calls sync() after each render so the checked radio reflects the
 // effective prefs, and forwards its document pointerdown to onOutsidePointer so
 // the panel closes on an outside click without bar.js knowing the panel's DOM.
-export function createSettingsPanel({ button, panel, host, getEffective, onPosition, onSize, onReset }) {
+export function createSettingsPanel({ button, panel, host, getEffective, onPosition, onSize, onTheme, onReset }) {
   let open = false;
 
   const radios = new Map();
@@ -269,12 +276,30 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
   }
   sizeSection.append(sizeLabel, sizeGroup);
 
+  const themeSection = document.createElement("div");
+  themeSection.className = "settings-section";
+  const themeLabel = document.createElement("label");
+  themeLabel.className = "settings-label";
+  themeLabel.textContent = "Theme";
+  const themeSelect = document.createElement("select");
+  themeSelect.className = "settings-theme";
+  themeSelect.id = "marquee-settings-theme";
+  themeLabel.htmlFor = themeSelect.id;
+  for (const theme of THEMES) {
+    const option = document.createElement("option");
+    option.value = theme;
+    option.textContent = THEME_LABELS[theme] || theme;
+    themeSelect.appendChild(option);
+  }
+  themeSelect.addEventListener("change", () => onTheme(themeSelect.value));
+  themeSection.append(themeLabel, themeSelect);
+
   const resetButton = document.createElement("button");
   resetButton.type = "button";
   resetButton.className = "settings-reset";
   resetButton.textContent = "Reset";
 
-  panel.replaceChildren(section, sizeSection, resetButton);
+  panel.replaceChildren(section, sizeSection, themeSection, resetButton);
 
   function sync() {
     const effective = getEffective();
@@ -284,6 +309,7 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
     for (const [size, sizeButton] of sizeButtons) {
       sizeButton.setAttribute("aria-pressed", String(size === effective.size));
     }
+    themeSelect.value = effective.theme;
   }
 
   function focusSelected() {

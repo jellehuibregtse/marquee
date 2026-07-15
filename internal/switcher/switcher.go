@@ -25,10 +25,15 @@ import (
 )
 
 // Runner is the subset of the process runner the switcher needs: restart the
-// child in a new working directory. Kept as an interface so tests can assert
-// exactly what process action a request did (or did not) trigger.
+// child in a new working directory, and open a managed lifecycle window for the
+// duration of a switch. BeginManaged/EndManaged make the child's transient
+// exits during a switch (the target restart, a failed boot, the revert) belong
+// to the switcher, not to main's shutdown path. Kept as an interface so tests
+// can assert exactly what process action a request did (or did not) trigger.
 type Runner interface {
 	Restart(ctx context.Context, dir string) error
+	BeginManaged()
+	EndManaged()
 }
 
 // Config wires the switch handler to the process runner, the git collector,
@@ -174,38 +179,82 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// prevDir is the worktree the child is running in now. If the switch fails
+	// to come up healthy, the switcher reverts the child back to it, so a bad
+	// switch leaves marquee exactly where it started rather than dead.
+	prevDir := dir
+
+	// The whole switch — target restart, health wait, and any revert — is a
+	// managed lifecycle window. A child exit inside it belongs to the switcher,
+	// never to main's shutdown path: main must not tear marquee down because a
+	// switched-into dev server failed to boot.
+	h.runner.BeginManaged()
+	defer h.runner.EndManaged()
+
 	h.setSwitching(target.Slug)
 	defer h.setSwitching("")
 
-	ctx, cancel := context.WithTimeout(context.Background(), h.restartTimeout)
-	defer cancel()
-	if err := h.runner.Restart(ctx, target.Path); err != nil {
-		h.logf("switch: restart failed: %v", err)
-		writeError(w, http.StatusInternalServerError, "restart", "could not restart the dev server")
+	switchErr := h.switchInto(target.Path)
+	if switchErr == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"slug":   target.Slug,
+			"path":   target.Path,
+			"isMain": targetIsMain,
+		})
 		return
 	}
+	h.logf("switch to %q failed: %v; reverting to %q", target.Slug, switchErr, prevDir)
 
-	h.mu.Lock()
-	h.currentDir = target.Path
-	h.mu.Unlock()
-	if h.repoint != nil {
-		h.repoint(target.Path)
+	// Revert exactly once, back to the previous worktree. Whether the revert
+	// itself comes up healthy or not, marquee stays alive (a dead-but-alive
+	// marquee the user can retry beats one that vanished); the response always
+	// reports the switch as a failure, never a fake success.
+	if err := h.switchInto(prevDir); err != nil {
+		h.logf("revert to %q also failed: %v", prevDir, err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":    "switch_failed",
+			"reverted": false,
+			"slug":     target.Slug,
+			"message":  "target worktree did not become healthy and the revert also failed; the dev server is down — retry or switch back",
+		})
+		return
+	}
+	writeJSON(w, http.StatusBadGateway, map[string]any{
+		"error":    "switch_failed",
+		"reverted": true,
+		"slug":     target.Slug,
+		"message":  "target worktree did not become healthy; reverted to the previous worktree",
+	})
+}
+
+// switchInto restarts the child in dir and waits for it to become healthy. On
+// success it repoints the pollers and records dir as the current worktree; on
+// failure (the restart could not start, or the child never became healthy) it
+// returns the error and leaves currentDir untouched so a revert restores it.
+func (h *Handler) switchInto(dir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), h.restartTimeout)
+	defer cancel()
+	if err := h.runner.Restart(ctx, dir); err != nil {
+		return err
 	}
 
 	if h.health != nil {
 		hctx, hcancel := context.WithTimeout(context.Background(), h.healthTimeout)
-		if err := h.health(hctx); err != nil {
-			h.logf("switch: new child not yet accepting connections: %v", err)
-		}
+		err := h.health(hctx)
 		hcancel()
+		if err != nil {
+			return err
+		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":     true,
-		"slug":   target.Slug,
-		"path":   target.Path,
-		"isMain": targetIsMain,
-	})
+	h.mu.Lock()
+	h.currentDir = dir
+	h.mu.Unlock()
+	if h.repoint != nil {
+		h.repoint(dir)
+	}
+	return nil
 }
 
 func (h *Handler) tokenOK(r *http.Request) bool {

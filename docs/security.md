@@ -234,7 +234,8 @@ hardened against corrupt input: see Threat 7's pidfile note.
   `TestValidSwitchAgainstRealRepoRestartsAndRepoints` (a real temp repo with
   two worktrees: a valid, same-origin, correctly-tokened switch restarts the
   child in **git's** worktree path and repoints the pollers there),
-  `TestRestartFailureReported` (a failed restart does not repoint) in
+  `TestRestartFailureRevertsAndReportsFailure` (a failed restart reverts, never
+  repoints to the target, and reports failure) in
   `internal/switcher/switcher_test.go`.
 
 ## Threat 5 — Malicious / compromised upstream responses
@@ -471,16 +472,49 @@ subcommand, no process action), so it does not change the "no action before the
 guards pass" guarantee.
 
 Only after all guards pass does marquee stop the child and
-`runner.Restart(ctx, worktreePath)`, then **repoint both the gitinfo and
-ghinfo pollers** to the new worktree (otherwise the bar keeps reporting the old
-worktree — the exact lie the tool exists to prevent), then TCP-health-poll the
-new child. `Poller.Repoint` swaps the collection directory under the same mutex
-that guards the cached snapshot, so a concurrent status read never sees a torn
-state (covered by `-race` tests). While a switch is in progress, proxied HTML
-navigations receive a self-refreshing "switching to *slug*…" page (the slug is
-HTML-escaped defensively) and non-HTML requests a plain 503; the switch POST
-itself and the status endpoint are on the internal namespace and are never
-blocked by that page.
+`runner.Restart(ctx, worktreePath)`, TCP-health-poll the new child, and — only
+once it is healthy — **repoint both the gitinfo and ghinfo pollers** to the new
+worktree (otherwise the bar keeps reporting the old worktree — the exact lie the
+tool exists to prevent). `Poller.Repoint` swaps the collection directory under
+the same mutex that guards the cached snapshot, so a concurrent status read
+never sees a torn state (covered by `-race` tests). While a switch is in
+progress, proxied HTML navigations receive a self-refreshing "switching to
+*slug*…" page (the slug is HTML-escaped defensively) and non-HTML requests a
+plain 503; the switch POST itself and the status endpoint are on the internal
+namespace and are never blocked by that page.
+
+**A failed switch is non-fatal and reverts (do-no-harm).** A switch can fail
+because the target worktree's dev server never comes up (e.g. its dependencies
+are not installed): the restarted child exits, or never accepts connections
+within the health timeout. Two properties keep such a failure from stranding the
+user:
+
+- **The shutdown path is switch-aware.** marquee wraps a dev server; when the
+  child exits *on its own*, marquee shuts down (that is the correct "your dev
+  server died" behavior). But an exit that is part of a restart or switch is
+  **not** the app dying — it is expected. The runner distinguishes the two: a
+  child exit closes `Runner.Terminated()` (the channel `cmd/marquee` selects on
+  to shut down) **only** when no managed lifecycle window is open. `Restart`
+  opens such a window around its own stop→start, and the switcher opens one
+  around the *entire* switch — target restart, health wait, and any revert — via
+  `BeginManaged`/`EndManaged`. Closing the window never retroactively fires the
+  signal, so an exit that happened inside it stays the switcher's to handle. The
+  result: the transient stop of a healthy switch never shuts marquee down, and a
+  switched-into dev server that fails to boot never shuts marquee down either.
+- **The switcher reverts, once, and never reports a fake success.** If the
+  target does not become healthy, the switcher restarts the child back in the
+  **previous** worktree, repoints the pollers back, and restores its
+  `currentDir`. If the reverted child is healthy, marquee continues on the
+  previous worktree as if the switch never happened. The response is always a
+  non-2xx `switch_failed` with a `reverted` boolean — never `{"ok":true}`. If
+  the target *and* the revert both fail to boot, marquee **still** does not
+  hard-exit: it stays alive with the child down, the proxy serves its existing
+  "starting/unavailable" page (`ErrorHandler`/`serveStarting`), and the response
+  reports `switch_failed` with `reverted:false` so the user can retry or switch
+  back. A dead-but-alive marquee the user can recover from beats one that
+  vanished mid-switch. The old child is fully stopped (whole process group) by
+  the restart before the revert spawns, so a failed switch never orphans a
+  process.
 
 **Token lifecycle.** The token is 256 bits from `crypto/rand`, hex-encoded (no
 HTML-special characters, so it embeds without escaping), minted **once** at
@@ -494,18 +528,33 @@ registers no switch endpoint. Golden fixtures stay valid because the token-less
 snippet is byte-identical to before; the tokened case is asserted separately
 with a fixed token, and no golden encodes the random value.
 
-- Code: `internal/switcher/switcher.go` (whole file); `serveSwitching` /
-  `renderSwitching` in `internal/proxy/switching.go`; `SetSwitchingProbe` /
-  `switchingSlug` and `Config.SwitchToken` in `internal/proxy/proxy.go`;
-  `barSnippetForToken` in `internal/proxy/inject.go`; `Poller.Repoint` in
-  `internal/gitinfo/poller.go` and `internal/ghinfo/ghinfo.go`; the wiring
-  (`mintToken`, `switcher.New`, `switcher.Register`, `SetSwitchingProbe`) in
-  `cmd/marquee/main.go`.
+- Code: `internal/switcher/switcher.go` (whole file — `Handler.serve`,
+  `switchInto` for the restart→health→repoint step and the single revert);
+  `Runner.Terminated`, `Runner.BeginManaged`/`EndManaged`, the managed window in
+  `Runner.Restart`, and the managed-aware wait goroutine in
+  `internal/runner/runner.go`; the `child.Terminated()` select in `run`
+  (`cmd/marquee/main.go`); `serveSwitching` / `renderSwitching` in
+  `internal/proxy/switching.go`; `SetSwitchingProbe` / `switchingSlug` and
+  `Config.SwitchToken` in `internal/proxy/proxy.go`; `barSnippetForToken` in
+  `internal/proxy/inject.go`; `Poller.Repoint` in `internal/gitinfo/poller.go`
+  and `internal/ghinfo/ghinfo.go`; the wiring (`mintToken`, `switcher.New`,
+  `switcher.Register`, `SetSwitchingProbe`) in `cmd/marquee/main.go`.
 - Proven by: the abuse and happy-path tests listed under Threats 3 and 4,
   plus `TestDirtyRefusedWithoutConfirm`, `TestDirtyConfirmedAllowed`,
   `TestDirtySwitchToMainAlwaysAllowed`, `TestConcurrentSwitchRejected`,
-  `TestSwitchingSlugReportedWhileInProgress` in
-  `internal/switcher/switcher_test.go`;
+  `TestSwitchingSlugReportedWhileInProgress`,
+  `TestHealthFailureRevertsToPreviousWorktree` in
+  `internal/switcher/switcher_test.go`; the real-runner integration tests
+  `TestIntegrationHealthySwitchKeepsMarqueeUp`,
+  `TestIntegrationFailedSwitchRevertsAndStaysAlive`,
+  `TestIntegrationBothFailStaysAlive` in
+  `internal/switcher/integration_test.go` (each asserts the shutdown signal is
+  or is not triggered against the real process lifecycle); the runner-level
+  lifecycle tests `TestTerminatedFiresOnUnmanagedExit` (wrapper-mode regression),
+  `TestTerminatedNotFiredDuringRestart` (`-race`),
+  `TestManagedWindowSuppressesTerminatedForever`,
+  `TestTerminatedFiresAfterRestartOnNaturalDeath` in
+  `internal/runner/terminated_test.go`;
   `TestSwitchingPageServedWhileSwitching`, `TestSwitchingPageEscapesSlug`,
   `TestSwitchingProbeAbsentBehavesNormally` in
   `internal/proxy/switch_test.go`; `TestPollerRepointSwitchesDirectory`

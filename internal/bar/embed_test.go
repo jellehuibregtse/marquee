@@ -59,9 +59,16 @@ func TestBarScriptEmbedded(t *testing.T) {
 		"prefers-reduced-motion",
 		"#statusPolls",
 		// ES-module split (PR 3): bar.js is no longer self-contained — it
-		// imports the pure prefs core from the sibling prefs.js module, served
-		// same-origin under the 'self' CSP relaxation.
+		// imports the pure prefs core and the settings panel from sibling
+		// modules, served same-origin under the 'self' CSP relaxation.
 		`from "./prefs.js"`,
+		`from "./settings.js"`,
+		// Settings panel (PR 3): the ⚙ button is a real control with an
+		// accessible name, and bar.js persists panel changes to localStorage.
+		`class="gear"`,
+		`aria-label="Bar settings"`,
+		"createSettingsPanel",
+		"localStore",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("bar.js missing expected marker %q", marker)
@@ -119,6 +126,52 @@ func TestPrefsModuleEmbedded(t *testing.T) {
 	} {
 		if strings.Contains(js, forbidden) {
 			t.Errorf("prefs.js contains forbidden pattern %q", forbidden)
+		}
+	}
+}
+
+func TestSettingsModuleEmbedded(t *testing.T) {
+	data, err := Assets.ReadFile("settings.js")
+	if err != nil {
+		t.Fatalf("read embedded settings.js: %v", err)
+	}
+	js := string(data)
+	if len(js) == 0 {
+		t.Fatal("embedded settings.js is empty")
+	}
+
+	// The ⚙ popover (PR 3): the exported interface bar.js consumes, the
+	// accessible Position radiogroup, the Reset control, and the disclosure
+	// wiring (Escape/outside-pointer close, focus return to the gear).
+	for _, marker := range []string{
+		"export const PANEL_CSS",
+		"export function createSettingsPanel",
+		`from "./prefs.js"`,
+		"radiogroup",
+		`type = "radio"`,
+		"marquee-position",
+		"Reset",
+		"onOutsidePointer",
+		`"Escape"`,
+		"aria-expanded",
+		".settings-menu",
+		// The panel entrance animation is disabled under reduced motion.
+		"prefers-reduced-motion",
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("settings.js missing expected marker %q", marker)
+		}
+	}
+
+	for _, forbidden := range []string{
+		"eval(",
+		"http://",
+		"https://",
+		"import(",
+		"fetch(",
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Errorf("settings.js contains forbidden pattern %q", forbidden)
 		}
 	}
 }

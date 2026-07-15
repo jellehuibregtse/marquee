@@ -80,7 +80,10 @@ export const PANEL_CSS = `
   right: auto;
   bottom: calc(100% + 6px);
   top: auto;
-  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: calc(10px * var(--mq-scale, 1));
+  min-width: calc(220px * var(--mq-scale, 1));
   padding: 8px;
   margin: 0;
   border-radius: 8px;
@@ -116,6 +119,7 @@ export const PANEL_CSS = `
   gap: 6px;
   padding: 3px 4px;
   border-radius: 5px;
+  white-space: nowrap;
   cursor: pointer;
 }
 .settings-radio:hover {
@@ -171,7 +175,6 @@ export const PANEL_CSS = `
   outline-offset: 2px;
 }
 .settings-reset {
-  margin-top: 8px;
   width: 100%;
   padding: 5px 8px;
   border: 1px solid var(--mq-border);

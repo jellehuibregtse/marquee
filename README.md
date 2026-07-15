@@ -69,12 +69,19 @@ Everything after `--` is your command, run verbatim.
 |---|---|---|
 | `--listen` | `127.0.0.1:3000` | Address marquee listens on. Loopback only. |
 | `--internal-port` | `0` (free port) | Port the child binds to; marquee sets `PORT` to this. |
-| `--position top\|bottom` | `bottom` | Where the bar sits (top collides with most app navbars). |
+| `--position` | `bottom-left` | Which corner the bar sits in: `bottom-left`, `bottom-right`, `top-left`, `top-right`. |
+| `--size` | `medium` | Bar size preset: `small`, `medium`, `large`. |
+| `--theme` | `default` | Bar theme: `default` (matches your light/dark scheme), `midnight`, `sand`, `forest`. |
+| `--pills` | `branch,dirty,worktree,pr` | Which info pills to show and in what order (comma-separated). Omit an id to hide it; empty hides all. |
 | `--no-open` | off | Don't open the browser on startup. |
 | `--quiet` | off | Suppress marquee's own log lines. |
 | `--allow-host` | — | Add a hostname to the internal-endpoint allowlist (repeatable). |
 | `--switch-hook` | — | Command run in the target worktree before switching to it, e.g. `"bundle install"`. Bootstraps a fresh worktree; a failing hook reverts the switch. |
 | `--unsafe-listen` | off | Allow a non-loopback `--listen` address. Prints a persistent warning; exposes your dev app to the network. |
+
+### Customizing the bar
+
+`--position`, `--size`, `--theme`, and `--pills` set the starting defaults. You can also change all four live from the **⚙ settings panel** in the bar itself — click the gear, pick a corner/size/theme, or toggle and reorder pills. Panel choices are saved in the browser per app and win over the flags on the next load; **Reset** returns everything to the flag defaults.
 
 ### Attach mode
 

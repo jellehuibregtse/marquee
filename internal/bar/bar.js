@@ -1,4 +1,5 @@
-import { DEFAULTS, merge } from "./prefs.js";
+import { DEFAULTS, merge, validate, load, save, reset } from "./prefs.js";
+import { PANEL_CSS, createSettingsPanel } from "./settings.js";
 
 const STORAGE_KEY = "marquee-bar-collapsed";
 const POLL_INTERVAL_MS = 5000;
@@ -292,7 +293,7 @@ a:focus-visible {
 `;
 
 const TEMPLATE = `
-<style>${CSS}</style>
+<style>${CSS}${PANEL_CSS}</style>
 <div class="wrap" hidden>
   <div class="bar" role="status" aria-label="Development branch information">
     <span class="chip branch"></span>
@@ -306,6 +307,10 @@ const TEMPLATE = `
       <div class="menu" role="menu" aria-label="Worktrees" hidden></div>
     </span>
   </div>
+  <span class="settings">
+    <button type="button" class="gear" aria-haspopup="true" aria-expanded="false" aria-controls="marquee-settings-menu" aria-label="Bar settings">⚙</button>
+    <div class="settings-menu" id="marquee-settings-menu" role="group" aria-label="Bar settings" hidden></div>
+  </span>
   <button type="button" class="toggle"></button>
 </div>
 `;
@@ -364,6 +369,17 @@ function safeHttpUrl(value) {
   }
 }
 
+// localStore returns the per-origin preference store, or null when even reading
+// window.localStorage throws (some sandboxed contexts do). prefs.js treats a
+// null store as absent, so settings persistence fails open to the CLI defaults.
+function localStore() {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 class MarqueeBar extends HTMLElement {
   #wrap;
   #bar;
@@ -377,6 +393,10 @@ class MarqueeBar extends HTMLElement {
   #switch;
   #switchLabel;
   #menu;
+  #gear;
+  #settingsMenu;
+  #settings;
+  #storedPrefs = {};
   #status = null;
   #statusPolls = 0;
   #timer = 0;
@@ -405,6 +425,17 @@ class MarqueeBar extends HTMLElement {
     this.#switch = this.shadowRoot.querySelector(".switch");
     this.#switchLabel = this.shadowRoot.querySelector(".switch-label");
     this.#menu = this.shadowRoot.querySelector(".menu");
+    this.#gear = this.shadowRoot.querySelector(".gear");
+    this.#settingsMenu = this.shadowRoot.querySelector(".settings-menu");
+    this.#storedPrefs = load(localStore());
+    this.#settings = createSettingsPanel({
+      button: this.#gear,
+      panel: this.#settingsMenu,
+      host: this,
+      getEffective: () => this.#effective(),
+      onPosition: (position) => this.#applyPref({ position }),
+      onReset: () => this.#resetPrefs(),
+    });
     this.#toggle.addEventListener("click", () => this.#onToggle());
     this.#switch.addEventListener("click", () => this.#toggleMenu());
     this.#menu.addEventListener("keydown", (event) => this.#onMenuKeydown(event));
@@ -458,10 +489,10 @@ class MarqueeBar extends HTMLElement {
       return;
     }
     this.#wrap.hidden = false;
-    // The CLI/status default is validated against the fallback defaults, so a
-    // missing or unrecognized position never leaves the bar unanchored.
-    const effective = merge(DEFAULTS, { position: status.position });
-    this.setAttribute("data-position", effective.position);
+    // Stored panel prefs overlay the CLI/status defaults; a missing or invalid
+    // value at either layer falls back, so the bar is never left unanchored.
+    this.setAttribute("data-position", this.#effective().position);
+    this.#settings.sync();
     const colors = branchColors(status.branch, this.#dark.matches);
     this.#branch.textContent = status.branch;
     this.#branch.style.background = colors.background;
@@ -476,6 +507,31 @@ class MarqueeBar extends HTMLElement {
     this.#renderPr(pr, prHref);
     this.#renderSwitcher(status);
     this.#toggle.style.background = this.#collapsed ? colors.background : "";
+  }
+
+  // #effective layers the stored panel prefs over the CLI/status defaults. The
+  // status default is itself validated against the fallback DEFAULTS, so both
+  // layers fail open: a bad value anywhere yields a valid effective pref.
+  #effective() {
+    const status = this.#status || {};
+    const defaults = merge(DEFAULTS, { position: status.position });
+    return merge(defaults, this.#storedPrefs);
+  }
+
+  // #applyPref sanitizes and persists a panel change, then re-renders so the
+  // overlay takes effect immediately and survives reload.
+  #applyPref(patch) {
+    this.#storedPrefs = validate({ ...this.#storedPrefs, ...patch }, DEFAULTS);
+    save(localStore(), this.#storedPrefs);
+    this.#render();
+  }
+
+  // #resetPrefs clears the stored overlay, returning every knob to the CLI
+  // default, and forgets it from storage.
+  #resetPrefs() {
+    this.#storedPrefs = {};
+    reset(localStore());
+    this.#render();
   }
 
   // #renderPr keeps the PR slot occupying a fixed width so the switcher and
@@ -647,6 +703,7 @@ class MarqueeBar extends HTMLElement {
     if (this.#menuOpen && !event.composedPath().includes(this)) {
       this.#closeMenu();
     }
+    this.#settings.onOutsidePointer(event);
   }
 
   async #switchTo(slug, confirmed) {

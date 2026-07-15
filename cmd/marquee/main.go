@@ -95,6 +95,12 @@ func run() int {
 		"MARQUEE=1",
 		fmt.Sprintf("MARQUEE_PORT=%d", port),
 	}, "")
+	// On a restart (the switch path), reclaim marquee's own internal port before
+	// spawning the new child, so an escaped remnant of the old child — a
+	// daemonizing process manager that survives the process-group stop — cannot
+	// keep the port and make the new child fail to bind (or a stale listener lie
+	// to the health probe). Scoped to this one loopback port; each reap is logged.
+	child.ReclaimPortOnRestart(port, func(format string, args ...any) { log.Info(format, args...) })
 	if err := child.Start(); err != nil {
 		log.Error("could not start child: %v", err)
 		_ = ln.Close()
@@ -138,6 +144,7 @@ func run() int {
 			Collect:    gitinfo.Collect,
 			Repoint:    func(dir string) { git.Repoint(dir); gh.Repoint(dir) },
 			Health:     func(ctx context.Context) error { return runner.WaitTCP(ctx, healthAddr, 0) },
+			ChildAlive: func() bool { return child.Status().State == runner.StateRunning },
 			Dir:        workdir,
 			SwitchHook: opts.switchHook,
 		})

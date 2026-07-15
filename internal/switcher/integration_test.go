@@ -12,8 +12,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -31,11 +35,113 @@ import (
 // whose deps are installed. A worktree without the marker exits immediately —
 // the real-world "switched into a worktree whose dev server fails to boot".
 func TestMain(m *testing.M) {
-	if os.Getenv("MARQUEE_TEST_CHILD") == "boot" {
+	switch os.Getenv("MARQUEE_TEST_CHILD") {
+	case "boot":
 		runTestChild()
+		return
+	case "daemon":
+		runDaemonChild()
+		return
+	case "listener":
+		runDetachedListener()
 		return
 	}
 	os.Exit(m.Run())
+}
+
+// runDaemonChild mimics a process manager that daemonizes (overmind/tmux). When
+// the worktree is bootstrapped and marquee's internal port is free, it launches
+// a listener in its OWN session (Setsid) so the listener escapes marquee's child
+// process group and survives the group-kill on stop — exactly how tmux
+// daemonizes its server — then blocks so marquee sees a running child. When the
+// port is already held (a previous worktree's escaped listener still squats it)
+// it launches nothing and just blocks, like a manager that will not re-bind.
+// When the worktree is not bootstrapped it exits non-zero after a short delay,
+// long enough that marquee has already (mis)read the stale escaped listener as
+// healthy — the ordering that makes the self-kill deterministic on unfixed code.
+func runDaemonChild() {
+	if _, err := os.Stat("boot-ok"); err != nil {
+		time.Sleep(300 * time.Millisecond)
+		os.Exit(1)
+	}
+	if !loopbackHeldTest(os.Getenv("PORT")) {
+		spawnDetachedListener()
+	}
+	// Block like a manager's foreground client until stopped. Blocking on a
+	// signal (rather than select{}) keeps Go's deadlock detector quiet and lets
+	// the process-group SIGTERM end this parent cleanly while the detached
+	// listener, in its own session, survives.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+	os.Exit(0)
+}
+
+// spawnDetachedListener re-execs this binary as a Setsid listener, waits until
+// it is accepting, then releases it. The listener is now in its own session and
+// will outlive a process-group kill of this daemon parent.
+func spawnDetachedListener() {
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), "MARQUEE_TEST_CHILD=listener")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		os.Exit(3)
+	}
+	addr := "127.0.0.1:" + os.Getenv("PORT")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond); err == nil {
+			_ = conn.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = cmd.Process.Release()
+}
+
+// runDetachedListener is the escaped grandchild: it binds the internal port,
+// records its own PID (so the test can reap it on cleanup) and the worktree it
+// booted in (so a test can tell which worktree's listener is live), then serves
+// until it is killed.
+func runDetachedListener() {
+	port := os.Getenv("PORT")
+	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		os.Exit(4)
+	}
+	if pidLog := os.Getenv("DETACH_PID_LOG"); pidLog != "" {
+		appendLineTest(pidLog, strconv.Itoa(os.Getpid()))
+	}
+	if cwdLog := os.Getenv("CWD_LOG"); cwdLog != "" {
+		wd, _ := os.Getwd()
+		appendLineTest(cwdLog, wd)
+	}
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+	}
+}
+
+func loopbackHeldTest(port string) bool {
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 100*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func appendLineTest(path, line string) {
+	// #nosec G304 -- path is a test-controlled temp file, never HTTP input.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintln(f, line)
+	_ = f.Close()
 }
 
 func runTestChild() {
@@ -140,6 +246,7 @@ func newIntHarnessHook(t *testing.T, switchHook string) *intHarness {
 		Runner:        child,
 		Collect:       gitinfo.Collect,
 		Health:        func(ctx context.Context) error { return runner.WaitTCP(ctx, addr, 20*time.Millisecond) },
+		ChildAlive:    func() bool { return child.Status().State == runner.StateRunning },
 		Dir:           main,
 		Logger:        log.New(io.Discard, "", 0),
 		HealthTimeout: 1500 * time.Millisecond,
@@ -457,4 +564,152 @@ func TestIntegrationSwitchHookNotRunOnRevert(t *testing.T) {
 	if runs := len(strings.Fields(strings.TrimSpace(string(b)))); runs != 1 {
 		t.Errorf("hook ran %d times, want 1 (forward switch only, never on the revert)", runs)
 	}
+}
+
+// newDaemonHarness wires the real runner + switcher over a child that
+// daemonizes (MARQUEE_TEST_CHILD=daemon): its listener runs in a separate
+// session and survives the process-group stop, exactly like a tmux/overmind
+// server. The switch is wired as in production — ReclaimPortOnRestart to free
+// the internal port before the new child spawns, and ChildAlive to require a
+// live child. Cleanup reaps every escaped listener the run spawned, so no
+// detached port leaks across the suite.
+func newDaemonHarness(t *testing.T) *intHarness {
+	t.Helper()
+	main := evalDir(t)
+	gitCmd(t, main, "init", "-b", "trunk")
+	gitCmd(t, main, "config", "user.name", "Fixture Author")
+	gitCmd(t, main, "config", "user.email", "fixture@example.com")
+	gitCmd(t, main, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(main, "boot-ok"), []byte("ok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, main, "add", ".")
+	gitCmd(t, main, "commit", "-m", "Add boot marker")
+	target := filepath.Join(evalDir(t), "feature")
+	gitCmd(t, main, "worktree", "add", "-b", "feature", target)
+
+	port := freeTestPort(t)
+	portInt, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	tmp := t.TempDir()
+	cwdLog := filepath.Join(tmp, "cwd.log")
+	pidLog := filepath.Join(tmp, "detach-pids.log")
+	child := runner.New(
+		[]string{os.Args[0]},
+		[]string{"MARQUEE_TEST_CHILD=daemon", "PORT=" + port, "CWD_LOG=" + cwdLog, "DETACH_PID_LOG=" + pidLog},
+		main,
+	)
+	child.ReclaimPortOnRestart(portInt, func(string, ...any) {})
+	if err := child.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = child.Stop(ctx, nil)
+		reapDetached(pidLog)
+	})
+
+	addr := "127.0.0.1:" + port
+	hctx, hcancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer hcancel()
+	if err := runner.WaitTCP(hctx, addr, 20*time.Millisecond); err != nil {
+		t.Fatalf("initial child never became healthy: %v", err)
+	}
+
+	sw := switcher.New(switcher.Config{
+		Token:         testToken,
+		Runner:        child,
+		Collect:       gitinfo.Collect,
+		Health:        func(ctx context.Context) error { return runner.WaitTCP(ctx, addr, 20*time.Millisecond) },
+		ChildAlive:    func() bool { return child.Status().State == runner.StateRunning },
+		Dir:           main,
+		Logger:        log.New(io.Discard, "", 0),
+		HealthTimeout: 700 * time.Millisecond,
+	})
+	mux := proxy.NewInternalMux()
+	switcher.Register(mux, sw)
+
+	return &intHarness{mux: mux, child: child, port: port, cwdLog: cwdLog, main: main, target: target}
+}
+
+// reapDetached kills every escaped listener PID the daemon child recorded, so a
+// listener that outlived the process-group stop does not leak its port.
+func reapDetached(pidLog string) {
+	b, err := os.ReadFile(pidLog)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if pid, err := strconv.Atoi(line); err == nil && pid > 1 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+}
+
+// Daemonizing-manager regression (the confirmed self-kill). The target is not
+// bootstrapped so its child exits, but the OLD child's escaped listener still
+// holds the internal port, so a naive TCP health probe connects to that stale
+// listener and passes. On unfixed code the switch is declared successful, its
+// managed window closes, the real (exited) child's death is then observed as
+// unmanaged, Terminated fires, and marquee shuts itself down. The fix frees the
+// port before the new child starts (the probe becomes honest) and requires a
+// live child, so the switch is a clean, reverting failure and marquee stays up.
+func TestIntegrationDaemonSelfKillRegression(t *testing.T) {
+	h := newDaemonHarness(t)
+	if err := os.Remove(filepath.Join(h.target, "boot-ok")); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := h.switchTo("feature", false)
+	if rec.Code/100 == 2 {
+		t.Fatalf("status = %d, want a non-2xx failure; body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		OK       bool   `json:"ok"`
+		Error    string `json:"error"`
+		Reverted bool   `json:"reverted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.OK {
+		t.Error("switch to an exited child reported ok:true (a stale listener lied to the health probe)")
+	}
+	if body.Error != "switch_failed" {
+		t.Errorf("error = %q, want %q", body.Error, "switch_failed")
+	}
+	if !body.Reverted {
+		t.Error("reverted = false, but the previous worktree is bootstrapped and should be restored")
+	}
+	// The crux: marquee must NOT have torn itself down because of the switch.
+	h.assertShutdownNotTriggered(t)
+	h.assertChildHealthy(t)
+	if got := h.lastChildCwd(t); got != mustEvalSymlinks(t, h.main) {
+		t.Errorf("live listener cwd = %q, want the reverted main worktree %q", got, h.main)
+	}
+}
+
+// With a daemonizing manager, a switch into a healthy target only works if the
+// escaped listener squatting the internal port is reaped first. After the reap,
+// the new child binds the freed port and truly serves the target worktree — the
+// live listener is the target's, not the stale one still answering for main.
+func TestIntegrationDaemonPortFreedSwitchSucceeds(t *testing.T) {
+	h := newDaemonHarness(t)
+
+	rec := h.switchTo("feature", false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	h.assertChildHealthy(t)
+	if got := h.lastChildCwd(t); got != mustEvalSymlinks(t, h.target) {
+		t.Errorf("live listener cwd = %q, want the feature worktree %q (new child bound the freed port)", got, h.target)
+	}
+	h.assertShutdownNotTriggered(t)
 }

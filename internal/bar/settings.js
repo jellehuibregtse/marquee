@@ -9,13 +9,29 @@
 // arrow-key selection works for free), focus is visible, and the entrance
 // animation is disabled under prefers-reduced-motion.
 
-import { POSITIONS } from "./prefs.js";
+import { POSITIONS, SIZES } from "./prefs.js";
 
 const POSITION_LABELS = {
   "bottom-left": "Bottom left",
   "bottom-right": "Bottom right",
   "top-left": "Top left",
   "top-right": "Top right",
+};
+
+// Size is a toggle-button group rather than radios: three short, equal choices
+// read best as a compact S/M/L segmented control. Each button carries the full
+// word as its accessible name while showing only the initial, and aria-pressed
+// marks the active preset so the state is exposed without native radio roles.
+const SIZE_LABELS = {
+  small: "Small",
+  medium: "Medium",
+  large: "Large",
+};
+
+const SIZE_ABBR = {
+  small: "S",
+  medium: "M",
+  large: "L",
 };
 
 // PANEL_CSS is concatenated into bar.js's single shadow-root <style>. The panel
@@ -102,6 +118,34 @@ export const PANEL_CSS = `
   outline: 2px solid #3b82f6;
   outline-offset: 2px;
 }
+.settings-sizes {
+  display: flex;
+  gap: 4px;
+}
+.settings-size {
+  flex: 1;
+  padding: 4px 0;
+  border: 1px solid #d0d0ce;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.settings-size:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+.settings-size:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+.settings-size[aria-pressed="true"] {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  color: #fff;
+  font-weight: 600;
+}
 .settings-reset {
   margin-top: 8px;
   width: 100%;
@@ -139,7 +183,8 @@ export const PANEL_CSS = `
 }
 @media (prefers-color-scheme: dark) {
   .gear,
-  .settings-reset {
+  .settings-reset,
+  .settings-size {
     background: #262626;
     color: #ededed;
     border-color: #4d4d4d;
@@ -149,8 +194,14 @@ export const PANEL_CSS = `
     color: #ededed;
     border-color: #4d4d4d;
   }
-  .settings-radio:hover {
+  .settings-radio:hover,
+  .settings-size:hover {
     background: rgba(255, 255, 255, 0.14);
+  }
+  .settings-size[aria-pressed="true"] {
+    background: #3b82f6;
+    border-color: #3b82f6;
+    color: #fff;
   }
   .settings-reset:hover,
   .settings-reset:focus-visible {
@@ -164,7 +215,7 @@ export const PANEL_CSS = `
 // bar.js calls sync() after each render so the checked radio reflects the
 // effective prefs, and forwards its document pointerdown to onOutsidePointer so
 // the panel closes on an outside click without bar.js knowing the panel's DOM.
-export function createSettingsPanel({ button, panel, host, getEffective, onPosition, onReset }) {
+export function createSettingsPanel({ button, panel, host, getEffective, onPosition, onSize, onReset }) {
   let open = false;
 
   const radios = new Map();
@@ -193,17 +244,45 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
   }
   section.append(label, group);
 
+  const sizeButtons = new Map();
+  const sizeSection = document.createElement("div");
+  sizeSection.className = "settings-section";
+  const sizeLabel = document.createElement("span");
+  sizeLabel.className = "settings-label";
+  sizeLabel.id = "marquee-settings-size-label";
+  sizeLabel.textContent = "Size";
+  const sizeGroup = document.createElement("div");
+  sizeGroup.className = "settings-sizes";
+  sizeGroup.setAttribute("role", "group");
+  sizeGroup.setAttribute("aria-labelledby", sizeLabel.id);
+  for (const size of SIZES) {
+    const sizeButton = document.createElement("button");
+    sizeButton.type = "button";
+    sizeButton.className = "settings-size";
+    sizeButton.dataset.size = size;
+    sizeButton.textContent = SIZE_ABBR[size] || size;
+    sizeButton.setAttribute("aria-label", SIZE_LABELS[size] || size);
+    sizeButton.setAttribute("aria-pressed", "false");
+    sizeButton.addEventListener("click", () => onSize(size));
+    sizeGroup.appendChild(sizeButton);
+    sizeButtons.set(size, sizeButton);
+  }
+  sizeSection.append(sizeLabel, sizeGroup);
+
   const resetButton = document.createElement("button");
   resetButton.type = "button";
   resetButton.className = "settings-reset";
   resetButton.textContent = "Reset";
 
-  panel.replaceChildren(section, resetButton);
+  panel.replaceChildren(section, sizeSection, resetButton);
 
   function sync() {
     const effective = getEffective();
     for (const [position, input] of radios) {
       input.checked = position === effective.position;
+    }
+    for (const [size, sizeButton] of sizeButtons) {
+      sizeButton.setAttribute("aria-pressed", String(size === effective.size));
     }
   }
 

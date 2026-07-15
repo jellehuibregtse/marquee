@@ -7,11 +7,14 @@
 
 export const POSITIONS = ["bottom-left", "bottom-right", "top-left", "top-right"];
 
+export const SIZES = ["small", "medium", "large"];
+
 // DEFAULTS mirrors the status defaults' shape. It is the fallback used when no
 // caller-supplied default and no stored value is valid. Later PRs extend it
-// with size/theme/pills; merge and validate stay generic over its keys.
+// with theme/pills; merge and validate stay generic over its keys.
 export const DEFAULTS = {
   position: "bottom-left",
+  size: "medium",
 };
 
 // VALIDATORS gates each known key. A key counts as "known" only when it appears
@@ -19,6 +22,7 @@ export const DEFAULTS = {
 // a knob is a new DEFAULTS entry plus a new validator, nothing else.
 const VALIDATORS = {
   position: (value) => POSITIONS.includes(value),
+  size: (value) => SIZES.includes(value),
 };
 
 const STORAGE_KEY = "marquee-bar-prefs";

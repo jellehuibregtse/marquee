@@ -10,7 +10,22 @@ const CSS = `
   bottom: 8px;
   left: 8px;
   z-index: 2147483000;
+  /* --mq-scale is the single knob the size presets drive; the bar's height,
+     font, chip dimensions, padding, and radii all multiply through it, so one
+     data-size attribute resizes the whole bar coherently. The 8px corner
+     offset above stays fixed so the bar hugs the same corner at every size. */
+  --mq-scale: 1;
   font: 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: calc(12px * var(--mq-scale, 1));
+}
+:host([data-size="small"]) {
+  --mq-scale: 0.85;
+}
+:host([data-size="medium"]) {
+  --mq-scale: 1;
+}
+:host([data-size="large"]) {
+  --mq-scale: 1.2;
 }
 :host([data-position="bottom-left"]) {
   top: auto;
@@ -42,15 +57,15 @@ const CSS = `
 .wrap {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6px * var(--mq-scale, 1));
 }
 .bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: 8px;
+  gap: calc(6px * var(--mq-scale, 1));
+  height: calc(28px * var(--mq-scale, 1));
+  padding: 0 calc(8px * var(--mq-scale, 1));
+  border-radius: calc(8px * var(--mq-scale, 1));
   background: #f5f5f4;
   color: #1c1c1c;
   border: 1px solid #d0d0ce;
@@ -59,9 +74,9 @@ const CSS = `
 .chip {
   display: inline-flex;
   align-items: center;
-  height: 18px;
-  padding: 0 7px;
-  border-radius: 9px;
+  height: calc(18px * var(--mq-scale, 1));
+  padding: 0 calc(7px * var(--mq-scale, 1));
+  border-radius: calc(9px * var(--mq-scale, 1));
   white-space: nowrap;
   background: rgba(0, 0, 0, 0.07);
 }
@@ -74,7 +89,7 @@ a.chip {
    x-position when the async PR poll resolves after first paint. */
 .pr {
   box-sizing: border-box;
-  width: var(--mq-pr-width, 118px);
+  width: calc(var(--mq-pr-width, 118px) * var(--mq-scale, 1));
 }
 .pr-text {
   min-width: 0;
@@ -109,8 +124,8 @@ a.chip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: calc(20px * var(--mq-scale, 1));
+  height: calc(20px * var(--mq-scale, 1));
   padding: 0;
   border: 1px solid #d0d0ce;
   border-radius: 50%;
@@ -123,8 +138,8 @@ a.chip {
   content: "\\2013";
 }
 .wrap.collapsed .toggle {
-  width: 14px;
-  height: 14px;
+  width: calc(14px * var(--mq-scale, 1));
+  height: calc(14px * var(--mq-scale, 1));
 }
 .toggle:focus-visible,
 a:focus-visible {
@@ -174,10 +189,10 @@ a:focus-visible {
 .switch {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 18px;
-  padding: 0 7px;
-  border-radius: 9px;
+  gap: calc(4px * var(--mq-scale, 1));
+  height: calc(18px * var(--mq-scale, 1));
+  padding: 0 calc(7px * var(--mq-scale, 1));
+  border-radius: calc(9px * var(--mq-scale, 1));
   border: 1px solid transparent;
   background: rgba(0, 0, 0, 0.07);
   color: inherit;
@@ -195,12 +210,12 @@ a:focus-visible {
   right: auto;
   bottom: calc(100% + 6px);
   top: auto;
-  min-width: 160px;
+  min-width: calc(160px * var(--mq-scale, 1));
   max-height: 240px;
   overflow-y: auto;
-  padding: 4px;
+  padding: calc(4px * var(--mq-scale, 1));
   margin: 0;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--mq-scale, 1));
   background: #f5f5f4;
   color: #1c1c1c;
   border: 1px solid #d0d0ce;
@@ -434,6 +449,7 @@ class MarqueeBar extends HTMLElement {
       host: this,
       getEffective: () => this.#effective(),
       onPosition: (position) => this.#applyPref({ position }),
+      onSize: (size) => this.#applyPref({ size }),
       onReset: () => this.#resetPrefs(),
     });
     this.#toggle.addEventListener("click", () => this.#onToggle());
@@ -490,8 +506,11 @@ class MarqueeBar extends HTMLElement {
     }
     this.#wrap.hidden = false;
     // Stored panel prefs overlay the CLI/status defaults; a missing or invalid
-    // value at either layer falls back, so the bar is never left unanchored.
-    this.setAttribute("data-position", this.#effective().position);
+    // value at either layer falls back, so the bar is never left unanchored or
+    // unscaled.
+    const effective = this.#effective();
+    this.setAttribute("data-position", effective.position);
+    this.setAttribute("data-size", effective.size);
     this.#settings.sync();
     const colors = branchColors(status.branch, this.#dark.matches);
     this.#branch.textContent = status.branch;
@@ -514,7 +533,7 @@ class MarqueeBar extends HTMLElement {
   // layers fail open: a bad value anywhere yields a valid effective pref.
   #effective() {
     const status = this.#status || {};
-    const defaults = merge(DEFAULTS, { position: status.position });
+    const defaults = merge(DEFAULTS, { position: status.position, size: status.size });
     return merge(defaults, this.#storedPrefs);
   }
 

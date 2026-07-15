@@ -35,6 +35,9 @@ func TestParseAttachArgsDefaults(t *testing.T) {
 	if opts.position != "bottom-left" {
 		t.Errorf("position = %q, want bottom-left", opts.position)
 	}
+	if opts.size != "medium" {
+		t.Errorf("size = %q, want medium", opts.size)
+	}
 	if opts.upstreamURL == nil || opts.upstreamURL.Host != "localhost:3100" {
 		t.Errorf("upstreamURL = %v, want host localhost:3100", opts.upstreamURL)
 	}
@@ -87,6 +90,37 @@ func TestParseAttachArgsInvalidPosition(t *testing.T) {
 	for _, corner := range []string{"bottom-left", "bottom-right", "top-left", "top-right"} {
 		if !strings.Contains(out, corner) {
 			t.Errorf("error message does not list %q: %q", corner, out)
+		}
+	}
+}
+
+func TestParseAttachArgsSizePresets(t *testing.T) {
+	for _, size := range []string{"small", "medium", "large"} {
+		opts, err := parseAttachArgs("marquee attach",
+			[]string{"--upstream", "http://localhost:3100", "--size", size}, io.Discard)
+		if err != nil {
+			t.Fatalf("parseAttachArgs(--size %s): %v", size, err)
+		}
+		if opts.size != size {
+			t.Errorf("size = %q, want %q", opts.size, size)
+		}
+	}
+}
+
+func TestParseAttachArgsInvalidSize(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseAttachArgs("marquee attach",
+		[]string{"--upstream", "http://localhost:3100", "--size", "huge"}, &buf)
+	if err == nil {
+		t.Fatal("parseAttachArgs accepted an invalid --size")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "invalid --size") {
+		t.Errorf("missing error message: %q", out)
+	}
+	for _, size := range []string{"small", "medium", "large"} {
+		if !strings.Contains(out, size) {
+			t.Errorf("error message does not list %q: %q", size, out)
 		}
 	}
 }

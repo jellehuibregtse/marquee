@@ -60,6 +60,7 @@ func fixtureDeps(t *testing.T, pr func() *ghinfo.PR) (status.Deps, string) {
 		PR:         pr,
 		ChildState: func() string { return "running" },
 		Position:   "bottom",
+		Size:       "medium",
 	}, dir
 }
 
@@ -122,12 +123,15 @@ func TestStatusJSONShape(t *testing.T) {
 	}
 
 	doc := assertKeys(t, "status", rec.Body.Bytes(),
-		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position")
+		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size")
 	assertKeys(t, "worktree", doc["worktree"], "path", "slug", "isMain")
 	assertKeys(t, "child", doc["child"], "state")
 
 	if string(doc["position"]) != `"bottom"` {
 		t.Errorf("position = %s, want \"bottom\"", doc["position"])
+	}
+	if string(doc["size"]) != `"medium"` {
+		t.Errorf("size = %s, want \"medium\"", doc["size"])
 	}
 
 	if string(doc["branch"]) != `"trunk"` {
@@ -169,7 +173,7 @@ func TestStatusIncludesPR(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	doc := assertKeys(t, "status", rec.Body.Bytes(),
-		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position")
+		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size")
 	assertKeys(t, "pr", doc["pr"], "number", "title", "url")
 	var got ghinfo.PR
 	if err := json.Unmarshal(doc["pr"], &got); err != nil || got != *pr {
@@ -192,6 +196,24 @@ func TestStatusReportsPosition(t *testing.T) {
 	}
 	if string(doc["position"]) != `"top"` {
 		t.Errorf("position = %s, want \"top\"", doc["position"])
+	}
+}
+
+func TestStatusReportsSize(t *testing.T) {
+	deps, _ := fixtureDeps(t, func() *ghinfo.PR { return nil })
+	deps.Size = "large"
+	mux := newMux(t, deps)
+
+	rec := get(mux, "http://localhost/__marquee/status")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if string(doc["size"]) != `"large"` {
+		t.Errorf("size = %s, want \"large\"", doc["size"])
 	}
 }
 

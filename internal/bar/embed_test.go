@@ -32,6 +32,15 @@ func TestBarScriptEmbedded(t *testing.T) {
 		`:host([data-position="top-right"])`,
 		`:host([data-position$="-right"]) .menu`,
 		`:host([data-position^="top-"]) .menu`,
+		// Size presets (PR 4): the bar carries the preset on a data-size
+		// attribute and every dimension multiplies through the single --mq-scale
+		// custom property, so one attribute rescales the whole bar.
+		"status.size",
+		"data-size",
+		"--mq-scale",
+		`:host([data-size="small"])`,
+		`:host([data-size="large"])`,
+		"calc(28px * var(--mq-scale, 1))",
 		"safeHttpUrl",
 		`url.protocol === "https:"`,
 		// Worktree switcher (M4-T2): the POST target, the token header echoed
@@ -110,6 +119,10 @@ func TestPrefsModuleEmbedded(t *testing.T) {
 		"marquee-bar-prefs",
 		"bottom-left",
 		"top-right",
+		// Size presets (PR 4): the size table and its default, validated the
+		// same generic way as position.
+		"export const SIZES",
+		`size: "medium"`,
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("prefs.js missing expected marker %q", marker)
@@ -150,6 +163,11 @@ func TestSettingsModuleEmbedded(t *testing.T) {
 		"radiogroup",
 		`type = "radio"`,
 		"marquee-position",
+		// Size control (PR 4): an S/M/L toggle-button group with aria-pressed,
+		// wired to the onSize callback and kept in sync by sync().
+		"settings-size",
+		"aria-pressed",
+		"onSize",
 		"Reset",
 		"onOutsidePointer",
 		`"Escape"`,

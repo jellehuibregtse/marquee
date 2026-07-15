@@ -43,12 +43,16 @@ type Runner struct {
 	argv     []string
 	extraEnv []string
 
-	mu      sync.Mutex
-	dir     string
-	cmd     *exec.Cmd
-	state   State
-	exitErr error
-	done    chan struct{}
+	mu           sync.Mutex
+	dir          string
+	cmd          *exec.Cmd
+	state        State
+	exitErr      error
+	done         chan struct{}
+	managedDepth int
+
+	terminated chan struct{}
+	termOnce   sync.Once
 }
 
 // New prepares a runner for argv, with extraEnv ("KEY=value" entries)
@@ -56,10 +60,11 @@ type Runner struct {
 // parent's working directory). Stdio is inherited from the parent.
 func New(argv []string, extraEnv []string, dir string) *Runner {
 	return &Runner{
-		argv:     argv,
-		extraEnv: extraEnv,
-		dir:      dir,
-		state:    StateStarting,
+		argv:       argv,
+		extraEnv:   extraEnv,
+		dir:        dir,
+		state:      StateStarting,
+		terminated: make(chan struct{}),
 	}
 }
 
@@ -94,10 +99,48 @@ func (r *Runner) Start() error {
 		r.mu.Lock()
 		r.exitErr = err
 		r.state = StateExited
+		unmanaged := r.managedDepth == 0
 		r.mu.Unlock()
 		close(done)
+		// A terminal exit fires Terminated only when the runner's lifecycle
+		// is not being managed (a Stop, Restart, or a switcher-owned switch).
+		// An exit that is part of a managed operation is the switcher's to
+		// handle — main must not mistake it for the app dying on its own.
+		if unmanaged {
+			r.termOnce.Do(func() { close(r.terminated) })
+		}
 	}()
 	return nil
+}
+
+// Terminated is closed once, on the first terminal child exit that happens
+// while the runner's lifecycle is not being managed. Exits that are part of a
+// Restart or a switcher-owned switch (see BeginManaged/EndManaged) never close
+// it, so the shutdown path in main is switch-aware by construction: it treats
+// a closed Terminated as "the app died on its own", never as the transient
+// stop of a restart or the failure of a switch the switcher will revert.
+func (r *Runner) Terminated() <-chan struct{} { return r.terminated }
+
+// BeginManaged marks the start of a managed lifecycle window. While any such
+// window is open, a child exit does not close Terminated — the caller owns the
+// outcome. Windows nest (a Restart inside a switcher-managed switch), so it is
+// paired with EndManaged via a depth counter.
+func (r *Runner) BeginManaged() {
+	r.mu.Lock()
+	r.managedDepth++
+	r.mu.Unlock()
+}
+
+// EndManaged closes a window opened by BeginManaged. It never retroactively
+// fires Terminated: an exit that already happened inside the window stays the
+// caller's to handle, which is what keeps marquee alive after a switch whose
+// target and revert both fail to boot.
+func (r *Runner) EndManaged() {
+	r.mu.Lock()
+	if r.managedDepth > 0 {
+		r.managedDepth--
+	}
+	r.mu.Unlock()
 }
 
 // Signal delivers sig to the child's entire process group. Signaling a
@@ -164,6 +207,11 @@ func (r *Runner) Stop(ctx context.Context, sig os.Signal) error {
 // command and environment. A non-empty dir becomes the new working
 // directory — this is the hook the worktree switcher uses.
 func (r *Runner) Restart(ctx context.Context, dir string) error {
+	// The stop half of a restart is an expected, transient exit — never a
+	// terminal one. The managed window makes sure the wait goroutine does not
+	// close Terminated when the old child goes away.
+	r.BeginManaged()
+	defer r.EndManaged()
 	if err := r.Stop(ctx, nil); err != nil {
 		return err
 	}

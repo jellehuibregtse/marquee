@@ -158,19 +158,11 @@ func run() int {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	childDone := make(chan struct{})
-	go func() {
-		for child.Status().State != runner.StateExited {
-			time.Sleep(100 * time.Millisecond)
-		}
-		close(childDone)
-	}()
-
 	select {
 	case sig := <-sigCh:
 		log.Info("received %s, stopping child", sig)
 		return stopChild(child, sig, log)
-	case <-childDone:
+	case <-child.Terminated():
 		st := child.Status()
 		code := exitCode(st.Err)
 		log.Info("child exited (%s), shutting down", exitReason(st.Err))

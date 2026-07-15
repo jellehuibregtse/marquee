@@ -18,6 +18,9 @@ func TestParseArgsDefaults(t *testing.T) {
 	if opts.position != "bottom-left" {
 		t.Errorf("position = %q, want bottom-left", opts.position)
 	}
+	if opts.size != "medium" {
+		t.Errorf("size = %q, want medium", opts.size)
+	}
 	if opts.noOpen || opts.quiet || opts.unsafeListen {
 		t.Errorf("bool flags default true: %+v", opts)
 	}
@@ -84,6 +87,35 @@ func TestParseArgsInvalidPosition(t *testing.T) {
 	for _, corner := range []string{"bottom-left", "bottom-right", "top-left", "top-right"} {
 		if !strings.Contains(out, corner) {
 			t.Errorf("error message does not list %q: %q", corner, out)
+		}
+	}
+}
+
+func TestParseArgsSizePresets(t *testing.T) {
+	for _, size := range []string{"small", "medium", "large"} {
+		opts, err := parseArgs("marquee", []string{"--size", size, "--", "bin/dev"}, io.Discard)
+		if err != nil {
+			t.Fatalf("parseArgs(--size %s): %v", size, err)
+		}
+		if opts.size != size {
+			t.Errorf("size = %q, want %q", opts.size, size)
+		}
+	}
+}
+
+func TestParseArgsInvalidSize(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseArgs("marquee", []string{"--size", "huge", "--", "bin/dev"}, &buf)
+	if err == nil {
+		t.Fatal("parseArgs accepted an invalid --size")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "invalid --size") {
+		t.Errorf("missing error message: %q", out)
+	}
+	for _, size := range []string{"small", "medium", "large"} {
+		if !strings.Contains(out, size) {
+			t.Errorf("error message does not list %q: %q", size, out)
 		}
 	}
 }

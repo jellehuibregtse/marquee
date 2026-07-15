@@ -31,10 +31,26 @@ func validPosition(p string) bool {
 
 const validPositions = "bottom-left, bottom-right, top-left, top-right"
 
+// sizeUsage documents the size presets --size accepts; validSize enforces them
+// and validSizes renders them for the error message.
+const sizeUsage = "how large the bar renders: small, medium, or large"
+
+func validSize(s string) bool {
+	switch s {
+	case "small", "medium", "large":
+		return true
+	default:
+		return false
+	}
+}
+
+const validSizes = "small, medium, large"
+
 type options struct {
 	listen       string
 	internalPort int
 	position     string
+	size         string
 	noOpen       bool
 	quiet        bool
 	allowHosts   []string
@@ -63,6 +79,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.StringVar(&opts.listen, "listen", "127.0.0.1:3000", "address to listen on (loopback only unless --unsafe-listen)")
 	fs.IntVar(&opts.internalPort, "internal-port", 0, "port the child binds to (0 picks a free port)")
 	fs.StringVar(&opts.position, "position", "bottom-left", positionUsage)
+	fs.StringVar(&opts.size, "size", "medium", sizeUsage)
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the app is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -84,6 +101,10 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be one of %s\n", opts.position, validPositions)
 		return nil, errUsage
 	}
+	if !validSize(opts.size) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --size %q: must be one of %s\n", opts.size, validSizes)
+		return nil, errUsage
+	}
 	if !opts.showVersion && len(opts.command) == 0 {
 		fs.Usage()
 		return nil, errUsage
@@ -99,6 +120,7 @@ type attachOptions struct {
 	upstream     string
 	upstreamURL  *url.URL
 	position     string
+	size         string
 	noOpen       bool
 	quiet        bool
 	allowHosts   []string
@@ -113,6 +135,7 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 	fs.StringVar(&opts.listen, "listen", "127.0.0.1:3000", "address to listen on (loopback only unless --unsafe-listen)")
 	fs.StringVar(&opts.upstream, "upstream", "", "upstream URL to proxy to, e.g. http://localhost:3100 (required, loopback only unless --unsafe-listen)")
 	fs.StringVar(&opts.position, "position", "bottom-left", positionUsage)
+	fs.StringVar(&opts.size, "size", "medium", sizeUsage)
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the upstream is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -131,6 +154,10 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 	}
 	if !validPosition(opts.position) {
 		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be one of %s\n", opts.position, validPositions)
+		return nil, errUsage
+	}
+	if !validSize(opts.size) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --size %q: must be one of %s\n", opts.size, validSizes)
 		return nil, errUsage
 	}
 	u, err := parseUpstream(opts.upstream)

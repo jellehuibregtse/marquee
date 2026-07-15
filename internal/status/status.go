@@ -22,6 +22,9 @@ type Deps struct {
 	// Position is where the bar renders ("top" or "bottom"); the bar
 	// script reads it from the status payload and positions itself.
 	Position string
+	// Size is the bar's size preset ("small", "medium", or "large"); the
+	// bar script reads it from the status payload and scales itself.
+	Size string
 }
 
 type child struct {
@@ -37,6 +40,7 @@ type payload struct {
 	Worktrees []gitinfo.Worktree      `json:"worktrees"`
 	Child     child                   `json:"child"`
 	Position  string                  `json:"position"`
+	Size      string                  `json:"size"`
 }
 
 // Register wires GET /__marquee/status and a GET route per embedded bar module
@@ -78,6 +82,7 @@ func statusHandler(deps Deps) http.Handler {
 			RepoRoot:  snap.RepoRoot,
 			Worktrees: snap.Worktrees,
 			Position:  deps.Position,
+			Size:      deps.Size,
 		}
 		if p.Worktrees == nil {
 			p.Worktrees = []gitinfo.Worktree{}

@@ -40,6 +40,15 @@ func TestBarScriptEmbedded(t *testing.T) {
 		"worktree.branch",
 		"item-branch",
 		"item-slug",
+		// PR-chip layout shift (PR 1): the slot reserves a fixed width and
+		// renders a reduced-motion-aware shimmer skeleton while the PR is still
+		// unknown, so the switcher/toggle don't shift when the async poll
+		// resolves. These markers pin that behavior into the asset.
+		"pr-text",
+		"skeleton",
+		"marquee-shimmer",
+		"prefers-reduced-motion",
+		"#statusPolls",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("bar.js missing expected marker %q", marker)

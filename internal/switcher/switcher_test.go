@@ -25,11 +25,13 @@ const testToken = "0123456789abcdef0123456789abcdef"
 // fakeRunner records every Restart so a test can assert exactly what process
 // action a request did — or, for the abuse tests, did not — trigger.
 type fakeRunner struct {
-	mu      sync.Mutex
-	dirs    []string
-	err     error
-	block   chan struct{} // when non-nil, Restart waits on it (concurrency test)
-	entered chan struct{}
+	mu       sync.Mutex
+	dirs     []string
+	err      error
+	block    chan struct{} // when non-nil, Restart waits on it (concurrency test)
+	entered  chan struct{}
+	managed  int  // current managed-window depth
+	balanced bool // set true whenever depth returns to 0 after being >0
 }
 
 func (f *fakeRunner) Restart(_ context.Context, dir string) error {
@@ -43,6 +45,29 @@ func (f *fakeRunner) Restart(_ context.Context, dir string) error {
 	defer f.mu.Unlock()
 	f.dirs = append(f.dirs, dir)
 	return f.err
+}
+
+func (f *fakeRunner) BeginManaged() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.managed++
+}
+
+func (f *fakeRunner) EndManaged() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.managed > 0 {
+		f.managed--
+	}
+	if f.managed == 0 {
+		f.balanced = true
+	}
+}
+
+func (f *fakeRunner) managedDepth() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.managed
 }
 
 func (f *fakeRunner) restarts() []string {
@@ -483,15 +508,83 @@ func TestValidSwitchAgainstRealRepoRestartsAndRepoints(t *testing.T) {
 	}
 }
 
-func TestRestartFailureReported(t *testing.T) {
+func TestRestartFailureRevertsAndReportsFailure(t *testing.T) {
+	// A runner whose every Restart fails: the target restart fails and so does
+	// the revert. The switch must report failure (never a fake ok), never
+	// repoint, and leave the managed window balanced.
 	runner := &fakeRunner{err: context.DeadlineExceeded}
-	h := newHarness(t, switcher.Config{Runner: runner})
+	repoint := &repointTracker{}
+	h := newHarness(t, switcher.Config{Runner: runner, Repoint: repoint.repoint})
 	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", rec.Code)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
 	}
-	// The repoint must NOT run if the restart failed.
-	if n := len(h.repoint.calls()); n != 0 {
+	if code := errorCode(t, rec); code != "switch_failed" {
+		t.Errorf("error = %q, want %q", code, "switch_failed")
+	}
+	var body struct {
+		OK       bool `json:"ok"`
+		Reverted bool `json:"reverted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.OK {
+		t.Error("a failed switch reported ok:true")
+	}
+	if body.Reverted {
+		t.Error("reverted reported true, but the revert also failed")
+	}
+	// The switch attempts the target, then the revert: two Restart calls.
+	if n := runner.count(); n != 2 {
+		t.Errorf("runner restarted %d times, want 2 (target + revert attempt)", n)
+	}
+	if n := len(repoint.calls()); n != 0 {
 		t.Errorf("repoint called %d times after a failed restart, want 0", n)
+	}
+	if runner.managedDepth() != 0 {
+		t.Errorf("managed depth = %d after serve, want 0 (window must be balanced)", runner.managedDepth())
+	}
+}
+
+func TestHealthFailureRevertsToPreviousWorktree(t *testing.T) {
+	// The target restart succeeds but never becomes healthy; the revert to the
+	// previous worktree does. The switch must report failure with reverted:true
+	// and repoint back to the previous worktree, not the target.
+	runner := &fakeRunner{}
+	repoint := &repointTracker{}
+	healthErr := map[string]error{"/repo/feature": context.DeadlineExceeded}
+	h := newHarness(t, switcher.Config{
+		Runner:  runner,
+		Repoint: repoint.repoint,
+		Dir:     "/repo/main",
+		Health: func(context.Context) error {
+			// The last dir the runner restarted into decides health.
+			dirs := runner.restarts()
+			return healthErr[dirs[len(dirs)-1]]
+		},
+	})
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if code := errorCode(t, rec); code != "switch_failed" {
+		t.Errorf("error = %q, want %q", code, "switch_failed")
+	}
+	var body struct {
+		Reverted bool `json:"reverted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Reverted {
+		t.Error("reverted reported false, but the revert succeeded")
+	}
+	if got := runner.restarts(); len(got) != 2 || got[0] != "/repo/feature" || got[1] != "/repo/main" {
+		t.Errorf("restarts = %v, want [/repo/feature /repo/main]", got)
+	}
+	// Only the healthy revert repoints, and only to the previous worktree.
+	if got := repoint.calls(); len(got) != 1 || got[0] != "/repo/main" {
+		t.Errorf("repoint calls = %v, want [/repo/main]", got)
 	}
 }

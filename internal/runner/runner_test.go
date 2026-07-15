@@ -5,8 +5,10 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +16,99 @@ import (
 	"testing"
 	"time"
 )
+
+// TestMain lets a test re-exec this binary as a bare TCP listener. Spawned in
+// its own session (Setsid), such a listener escapes a process-group kill — the
+// exact remnant a daemonizing process manager leaves behind — so the reap tests
+// exercise the real kill-by-port path.
+func TestMain(m *testing.M) {
+	if port := os.Getenv("RUNNER_TEST_LISTEN"); port != "" {
+		ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+		if err != nil {
+			os.Exit(1)
+		}
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}
+	os.Exit(m.Run())
+}
+
+func freePortForTest(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick free port: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// TestFreeLoopbackPortFastWhenFree: a free port needs no reaping and returns
+// promptly without touching lsof or killing anything.
+func TestFreeLoopbackPortFastWhenFree(t *testing.T) {
+	port := freePortForTest(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := freeLoopbackPort(ctx, port, nil); err != nil {
+		t.Fatalf("freeLoopbackPort on a free port: %v", err)
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Errorf("freeLoopbackPort on a free port took %v, want it to return promptly", d)
+	}
+}
+
+// TestFreeLoopbackPortReapsEscapedListener: a listener in its own session (so a
+// process-group kill would miss it) squatting the internal port is found and
+// reaped, the port ends up free, and exactly one non-secret reap line is logged.
+func TestFreeLoopbackPortReapsEscapedListener(t *testing.T) {
+	port := freePortForTest(t)
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), "RUNNER_TEST_LISTEN="+strconv.Itoa(port))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start escaped listener: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	waitFor(t, 2*time.Second, "escaped listener up", func() bool {
+		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+		return true
+	})
+
+	var logged []string
+	logf := func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := freeLoopbackPort(ctx, port, logf); err != nil {
+		t.Fatalf("freeLoopbackPort: %v", err)
+	}
+	if loopbackPortHeld(port) {
+		t.Fatal("internal port still held after freeLoopbackPort reaped its listener")
+	}
+	if len(logged) != 1 {
+		t.Fatalf("reap logged %d lines, want 1: %v", len(logged), logged)
+	}
+	if !strings.Contains(logged[0], strconv.Itoa(port)) || !strings.Contains(logged[0], "reaped") {
+		t.Errorf("reap log = %q, want it to name the internal port %d and say it was reaped", logged[0], port)
+	}
+	if strings.Contains(logged[0], "RUNNER_TEST_LISTEN") || strings.Contains(logged[0], os.Args[0]) {
+		t.Errorf("reap log leaked a command line: %q", logged[0])
+	}
+}
 
 func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()

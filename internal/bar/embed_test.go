@@ -35,6 +35,11 @@ func TestBarScriptEmbedded(t *testing.T) {
 		`role="menu"`,
 		"aria-expanded",
 		"textContent",
+		// Switch menu rows distinguish the branch from the worktree slug, so
+		// the primary label reads the branch and the secondary reads the slug.
+		"worktree.branch",
+		"item-branch",
+		"item-slug",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("bar.js missing expected marker %q", marker)

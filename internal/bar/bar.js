@@ -163,7 +163,29 @@ a:focus-visible {
 .menu button[aria-current="true"] {
   font-weight: 600;
 }
+.item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.item-branch,
+.item-slug {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.item-slug {
+  font-size: 11px;
+  opacity: 0.7;
+}
+.switch-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .spinner {
+  flex: none;
   display: inline-block;
   width: 10px;
   height: 10px;
@@ -423,12 +445,25 @@ class MarqueeBar extends HTMLElement {
       item.type = "button";
       item.setAttribute("role", "menuitem");
       const slug = String(worktree.slug || "");
+      const branch = String(worktree.branch || "");
       item.dataset.slug = slug;
       const isCurrent = slug === currentSlug;
       if (isCurrent) item.setAttribute("aria-current", "true");
-      const label = document.createElement("span");
-      label.textContent = slug + (isCurrent ? " (current)" : "");
-      item.replaceChildren(label);
+      const text = document.createElement("span");
+      text.className = "item-text";
+      const primary = document.createElement("span");
+      primary.className = "item-branch";
+      primary.textContent = (branch || slug) + (isCurrent ? " (current)" : "");
+      text.appendChild(primary);
+      if (branch && branch !== slug) {
+        const secondary = document.createElement("span");
+        secondary.className = "item-slug";
+        secondary.textContent = slug;
+        text.appendChild(secondary);
+      }
+      item.replaceChildren(text);
+      const description = branch ? `Branch ${branch}, worktree ${slug}` : `Worktree ${slug}`;
+      item.setAttribute("aria-label", isCurrent ? `${description}, current` : description);
       item.addEventListener("click", () => {
         this.#closeMenu();
         if (!isCurrent) this.#switchTo(slug, false);

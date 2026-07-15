@@ -484,8 +484,11 @@ guards pass" guarantee.
 
 Only after all guards pass does marquee — optionally — run the operator's
 `--switch-hook` in the **target worktree** (`cwd` = git's own worktree path), then
-stop the child and `runner.Restart(ctx, worktreePath)`, TCP-health-poll the new
-child, and — only once it is healthy — **repoint both the gitinfo and ghinfo
+stop the child and `runner.Restart(ctx, worktreePath)` (which reclaims marquee's
+internal port before the spawn — see "Reclaiming the internal port" below),
+TCP-health-poll the new child, **require that the child is still running** (a
+passing probe alone is not proof it booted — see the shutdown-path note), and —
+only once it is both healthy and alive — **repoint both the gitinfo and ghinfo
 pollers** to the new worktree (otherwise the bar keeps reporting the old worktree — the exact lie the
 tool exists to prevent). `Poller.Repoint` swaps the collection directory under
 the same mutex that guards the cached snapshot, so a concurrent status read
@@ -513,6 +516,17 @@ user:
   signal, so an exit that happened inside it stays the switcher's to handle. The
   result: the transient stop of a healthy switch never shuts marquee down, and a
   switched-into dev server that fails to boot never shuts marquee down either.
+- **A switch requires a *live* child, not just an answering port.** A TCP health
+  probe can pass by connecting to a **stale listener** — an escaped daemon left
+  by the old child, still holding the internal port (see "Reclaiming the internal
+  port"). So a passing probe alone does not prove the new child booted: the
+  switch also checks `ChildAlive` (the runner's `StateRunning`) right after the
+  probe. If the child has exited, the switch is a failure and reverts — it never
+  reports `{"ok":true}` on a dead child, which is what previously let a doomed
+  switch declare success, close its managed window, and then have the child's
+  exit observed as *unmanaged*, firing `Terminated` and shutting marquee down.
+  Freeing the port (above) also makes the probe honest; the liveness check is the
+  belt to the port-reclaim's braces.
 - **The switcher reverts, once, and never reports a fake success.** If the
   target does not become healthy, the switcher restarts the child back in the
   **previous** worktree, repoints the pollers back, and restores its
@@ -546,16 +560,47 @@ marquee still alive. The hook runs **only for the forward switch**, never on the
 revert — the previous worktree already worked, so re-bootstrapping it would be
 wasteful and could fail spuriously.
 
-Known limitation (accepted): **process managers that daemonize.** marquee stops
-the child by killing its whole process group. A manager such as `overmind` or a
-`tmux`-based runner daemonizes its server into a *separate* session, so those
-grandchildren are not in the killed group and may survive a switch, still
-holding the internal port. Such a switch fails **cleanly**: the restarted child
-cannot bind the occupied port, so it fails to boot and the switch takes the
-revert / both-fail path (marquee stays alive, reports `switch_failed`, and the
-user can recover) rather than corrupting state. A full teardown for daemonizing
-managers (tracking and terminating out-of-group descendants) is future work,
-deliberately not built here.
+**Reclaiming the internal port on a switch (kill-by-port).** marquee stops the
+child by killing its whole process group. A manager such as `overmind` or a
+`tmux`-based runner daemonizes its server into a *separate* session, so that
+server is not in the killed group: it survives the stop and keeps holding
+marquee's internal port. Left alone this both blocks the new child from binding
+*and* lets the post-restart health probe connect to the stale listener and pass,
+which previously made a doomed switch look successful. On the restart path only,
+`Runner.Restart` therefore reclaims the port between the stop and the spawn
+(`ReclaimPortOnRestart`, wired from `cmd/marquee`): it polls briefly for the port
+to be released and, if it is still held, finds the PID(s) **listening on
+marquee's own internal loopback port** via `lsof` (the same pattern as the
+startup port diagnostic) and sends them `SIGKILL`, then confirms the port is
+free before spawning the new child.
+
+This is the only place marquee kills a process it did not itself spawn, so its
+scope is deliberately tight and auditable:
+
+- **What it kills:** only a process **listening on marquee's own internal
+  loopback port** — the port marquee itself chose and handed the child as
+  `PORT` — and only during a switch/restart, in the window after the old child's
+  group is stopped and before the new child spawns. The port number is an
+  integer marquee owns; it never comes from the HTTP request or the slug. PIDs
+  come straight from `lsof` of that one port; pid `0`/`1` are never signalled.
+- **Why:** the killed process is, by construction, an escaped remnant of the
+  child marquee manages (a daemonized dev server holding the port marquee gave
+  it), which the process-group stop cannot reach.
+- **Logged:** each kill logs one line naming the PID and that it held the
+  internal port — never a command line or any secret. The `lsof`/kill step
+  carries a justified `#nosec G204` in `internal/runner/runner.go`.
+
+Known limitation (accepted, narrowed by the above): a daemonizing manager still
+leaves **sibling processes** in its detached session (e.g. `sidekiq`, `vite`)
+and any stale manager socket (e.g. `.overmind.sock`) that marquee does not touch
+— it reclaims only its own internal port, nothing else. Those may still need
+operator cleanup, which the switch hook can do: for example
+`--switch-hook="rm -f .overmind.sock && bundle install && pnpm install"` clears a
+stale socket (which would otherwise make the manager refuse to start) and
+installs dependencies before the target boots. If the target still cannot come
+up, the switch now takes the revert / both-fail path **cleanly** (marquee stays
+alive, reports `switch_failed`, the user can recover) rather than being fooled by
+the stale listener into a fake success that later shuts marquee down.
 
 Known limitation (accepted): a switch's managed window suppresses child-exit
 shutdown until it closes. If a just-health-checked child dies in the sub-
@@ -579,26 +624,41 @@ snippet is byte-identical to before; the tokened case is asserted separately
 with a fixed token, and no golden encodes the random value.
 
 - Code: `internal/switcher/switcher.go` (whole file — `Handler.serve`,
-  `switchInto` for the (hook→)restart→health→repoint step and the single revert,
+  `switchInto` for the (hook→)restart→health→**live-child**→repoint step and the
+  single revert, the `ChildAlive` check that fails a switch to an exited child,
   `runSwitchHook` for the operator hook run in the target worktree);
   `Runner.Terminated`, `Runner.BeginManaged`/`EndManaged`, the managed window in
-  `Runner.Restart`, and the managed-aware wait goroutine in
-  `internal/runner/runner.go`; the `child.Terminated()` select in `run`
+  `Runner.Restart`, `Runner.ReclaimPortOnRestart` and `freeLoopbackPort` /
+  `loopbackListeners` / `reapListener` (the kill-by-port reclaim), and the
+  managed-aware wait goroutine in `internal/runner/runner.go`; the
+  `child.Terminated()` select in `run`
   (`cmd/marquee/main.go`); `serveSwitching` / `renderSwitching` in
   `internal/proxy/switching.go`; `SetSwitchingProbe` / `switchingSlug` and
   `Config.SwitchToken` in `internal/proxy/proxy.go`; `barSnippetForToken` in
   `internal/proxy/inject.go`; `Poller.Repoint` in `internal/gitinfo/poller.go`
   and `internal/ghinfo/ghinfo.go`; the wiring (`mintToken`, `switcher.New`,
-  `switcher.Register`, `SetSwitchingProbe`) in `cmd/marquee/main.go`.
+  `switcher.Register`, `SetSwitchingProbe`, `child.ReclaimPortOnRestart`,
+  `ChildAlive`) in `cmd/marquee/main.go`.
 - Proven by: the abuse and happy-path tests listed under Threats 3 and 4,
   plus `TestDirtyRefusedWithoutConfirm`, `TestDirtyConfirmedAllowed`,
   `TestDirtySwitchToMainAlwaysAllowed`, `TestConcurrentSwitchRejected`,
   `TestSwitchingSlugReportedWhileInProgress`,
-  `TestHealthFailureRevertsToPreviousWorktree` in
-  `internal/switcher/switcher_test.go`; the real-runner integration tests
+  `TestHealthFailureRevertsToPreviousWorktree`,
+  `TestSwitchFailsWhenChildDiesDespiteHealthOK` (a passing health probe on an
+  exited child is a reverting failure, never a fake `ok:true`) in
+  `internal/switcher/switcher_test.go`; the runner-level reclaim tests
+  `TestFreeLoopbackPortFastWhenFree` and `TestFreeLoopbackPortReapsEscapedListener`
+  (a Setsid listener squatting the internal port is reaped, the port ends up
+  free, and exactly one non-secret reap line is logged) in
+  `internal/runner/runner_test.go`; the real-runner integration tests
   `TestIntegrationHealthySwitchKeepsMarqueeUp`,
   `TestIntegrationFailedSwitchRevertsAndStaysAlive`,
   `TestIntegrationBothFailStaysAlive`,
+  `TestIntegrationDaemonSelfKillRegression` (a daemonizing manager whose escaped
+  listener holds the port while the target child exits: the switch is a reverting
+  failure and `Terminated` never fires — marquee stays up),
+  `TestIntegrationDaemonPortFreedSwitchSucceeds` (the escaped listener is reaped
+  so the healthy target's new child binds the freed port and truly serves it),
   `TestIntegrationSwitchHookRunsInTargetWorktree` (the hook's marker lands in the
   target worktree and the child then boots there), `TestSwitchHookFailureRevertsWithoutTargetRestart`
   (a failing hook reverts via the existing path, restarting only the previous

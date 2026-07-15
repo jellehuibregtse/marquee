@@ -137,6 +137,7 @@ func run() int {
 		Position:   opts.position,
 		Size:       opts.size,
 		Theme:      opts.theme,
+		Pills:      opts.pills,
 	})
 	if switchToken != "" {
 		healthAddr := fmt.Sprintf("127.0.0.1:%d", port)

@@ -16,6 +16,11 @@ export const SIZES = ["small", "medium", "large"];
 // own hash-contrast guarantee is untouched.
 export const THEMES = ["default", "midnight", "sand", "forest"];
 
+// PILL_IDS are the four info pills the bar can render, in their default order.
+// The pills pref is an ordered subset of these: list order is render order and
+// an omitted id is hidden. bar.js and settings.js both iterate this table.
+export const PILL_IDS = ["branch", "dirty", "worktree", "pr"];
+
 // DEFAULTS mirrors the status defaults' shape. It is the fallback used when no
 // caller-supplied default and no stored value is valid. Later PRs extend it
 // with pills; merge and validate stay generic over its keys.
@@ -23,6 +28,7 @@ export const DEFAULTS = {
   position: "bottom-left",
   size: "medium",
   theme: "default",
+  pills: ["branch", "dirty", "worktree", "pr"],
 };
 
 // VALIDATORS gates each known key. A key counts as "known" only when it appears
@@ -32,6 +38,18 @@ const VALIDATORS = {
   position: (value) => POSITIONS.includes(value),
   size: (value) => SIZES.includes(value),
   theme: (value) => THEMES.includes(value),
+  // pills must be an array of known ids with no duplicates; an empty array is
+  // valid and hides every pill. An invalid value is dropped so the default
+  // (all four, in order) wins, keeping the bar fail-open.
+  pills: (value) => {
+    if (!Array.isArray(value)) return false;
+    const seen = new Set();
+    for (const id of value) {
+      if (!PILL_IDS.includes(id) || seen.has(id)) return false;
+      seen.add(id);
+    }
+    return true;
+  },
 };
 
 const STORAGE_KEY = "marquee-bar-prefs";

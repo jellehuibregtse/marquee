@@ -9,7 +9,7 @@
 // arrow-key selection works for free), focus is visible, and the entrance
 // animation is disabled under prefers-reduced-motion.
 
-import { POSITIONS, SIZES, THEMES } from "./prefs.js";
+import { POSITIONS, SIZES, THEMES, PILL_IDS } from "./prefs.js";
 
 const POSITION_LABELS = {
   "bottom-left": "Bottom left",
@@ -42,6 +42,17 @@ const THEME_LABELS = {
   midnight: "Midnight",
   sand: "Sand",
   forest: "Forest",
+};
+
+// The Pills section is a per-id list: each row is a checkbox (shown/hidden) with
+// the pill's label plus ↑/↓ buttons to reorder. It reflects the effective order,
+// so hidden ids trail the visible ones; changing a checkbox or moving a row
+// applies live and persists through the same prefs plumbing as the other knobs.
+const PILL_LABELS = {
+  branch: "Branch",
+  dirty: "Uncommitted changes",
+  worktree: "Worktree",
+  pr: "Pull request",
 };
 
 // PANEL_CSS is concatenated into bar.js's single shadow-root <style>. The panel
@@ -174,6 +185,56 @@ export const PANEL_CSS = `
   outline: 2px solid #3b82f6;
   outline-offset: 2px;
 }
+.settings-pills {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 5px;
+}
+.settings-pill:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+.settings-pill-label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.settings-pill-label input {
+  margin: 0;
+}
+.settings-pill-move {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--mq-border);
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.settings-pill-move:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.settings-pill-label input:focus-visible,
+.settings-pill-move:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
 .settings-reset {
   width: 100%;
   padding: 5px 8px;
@@ -210,7 +271,8 @@ export const PANEL_CSS = `
 }
 @media (prefers-color-scheme: dark) {
   .settings-radio:hover,
-  .settings-size:hover {
+  .settings-size:hover,
+  .settings-pill:hover {
     background: rgba(255, 255, 255, 0.14);
   }
   .settings-reset:hover,
@@ -225,7 +287,7 @@ export const PANEL_CSS = `
 // bar.js calls sync() after each render so the checked radio reflects the
 // effective prefs, and forwards its document pointerdown to onOutsidePointer so
 // the panel closes on an outside click without bar.js knowing the panel's DOM.
-export function createSettingsPanel({ button, panel, host, getEffective, onPosition, onSize, onTheme, onReset }) {
+export function createSettingsPanel({ button, panel, host, getEffective, onPosition, onSize, onTheme, onPills, onReset }) {
   let open = false;
 
   const radios = new Map();
@@ -297,12 +359,117 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
   themeSelect.addEventListener("change", () => onTheme(themeSelect.value));
   themeSection.append(themeLabel, themeSelect);
 
+  const pillsSection = document.createElement("div");
+  pillsSection.className = "settings-section";
+  const pillsLabel = document.createElement("span");
+  pillsLabel.className = "settings-label";
+  pillsLabel.id = "marquee-settings-pills-label";
+  pillsLabel.textContent = "Pills";
+  const pillsGroup = document.createElement("div");
+  pillsGroup.className = "settings-pills";
+  pillsGroup.setAttribute("role", "group");
+  pillsGroup.setAttribute("aria-labelledby", pillsLabel.id);
+  pillsSection.append(pillsLabel, pillsGroup);
+
+  // pendingFocus survives the rebuild in syncPills so keyboard reorder keeps
+  // focus on the control the user just pressed. It names the pill and the
+  // button that moved; syncPills refocuses that button, falling back to the
+  // row's other button (when the pressed one becomes disabled at an end) and
+  // then the checkbox, so keyboard operation never dead-ends.
+  let pendingFocus = null;
+  let lastPillsKey = null;
+
+  function emitPills(order, visibleSet) {
+    onPills(order.filter((id) => visibleSet.has(id)));
+  }
+
+  // syncPills rebuilds the rows only when the effective order or visibility
+  // actually changed, so a background status poll re-rendering the bar never
+  // tears down rows the user is interacting with (which would drop focus).
+  function syncPills() {
+    const visible = getEffective().pills;
+    const visibleSet = new Set(visible);
+    const order = [...visible, ...PILL_IDS.filter((id) => !visibleSet.has(id))];
+    const key = order.map((id) => (visibleSet.has(id) ? "+" : "-") + id).join(",");
+    if (key === lastPillsKey) {
+      pendingFocus = null;
+      return;
+    }
+    lastPillsKey = key;
+    const rows = new Map();
+    pillsGroup.replaceChildren();
+    order.forEach((id, index) => {
+      const row = document.createElement("div");
+      row.className = "settings-pill";
+
+      const rowLabel = document.createElement("label");
+      rowLabel.className = "settings-pill-label";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = visibleSet.has(id);
+      checkbox.addEventListener("change", () => {
+        const next = new Set(visibleSet);
+        if (checkbox.checked) next.add(id);
+        else next.delete(id);
+        pendingFocus = { id, dir: "checkbox" };
+        emitPills(order, next);
+      });
+      const text = document.createElement("span");
+      text.textContent = PILL_LABELS[id] || id;
+      rowLabel.append(checkbox, text);
+
+      const up = document.createElement("button");
+      up.type = "button";
+      up.className = "settings-pill-move";
+      up.textContent = "↑";
+      up.setAttribute("aria-label", `Move ${PILL_LABELS[id] || id} up`);
+      up.disabled = index === 0;
+      up.addEventListener("click", () => {
+        const next = [...order];
+        [next[index - 1], next[index]] = [next[index], next[index - 1]];
+        pendingFocus = { id, dir: "up" };
+        emitPills(next, visibleSet);
+      });
+
+      const down = document.createElement("button");
+      down.type = "button";
+      down.className = "settings-pill-move";
+      down.textContent = "↓";
+      down.setAttribute("aria-label", `Move ${PILL_LABELS[id] || id} down`);
+      down.disabled = index === order.length - 1;
+      down.addEventListener("click", () => {
+        const next = [...order];
+        [next[index], next[index + 1]] = [next[index + 1], next[index]];
+        pendingFocus = { id, dir: "down" };
+        emitPills(next, visibleSet);
+      });
+
+      row.append(rowLabel, up, down);
+      pillsGroup.appendChild(row);
+      rows.set(id, { checkbox, up, down });
+    });
+
+    if (pendingFocus) {
+      const controls = rows.get(pendingFocus.id);
+      const dir = pendingFocus.dir;
+      pendingFocus = null;
+      if (controls && dir === "checkbox") {
+        controls.checkbox.focus();
+      } else if (controls) {
+        const preferred = dir === "up" ? controls.up : controls.down;
+        const other = dir === "up" ? controls.down : controls.up;
+        const target = !preferred.disabled ? preferred : !other.disabled ? other : controls.checkbox;
+        target.focus();
+      }
+    }
+  }
+
   const resetButton = document.createElement("button");
   resetButton.type = "button";
   resetButton.className = "settings-reset";
   resetButton.textContent = "Reset";
 
-  panel.replaceChildren(section, sizeSection, themeSection, resetButton);
+  panel.replaceChildren(section, sizeSection, themeSection, pillsSection, resetButton);
 
   function sync() {
     const effective = getEffective();
@@ -313,6 +480,7 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
       sizeButton.setAttribute("aria-pressed", String(size === effective.size));
     }
     themeSelect.value = effective.theme;
+    syncPills();
   }
 
   function focusSelected() {

@@ -152,6 +152,70 @@ func TestParseArgsInvalidTheme(t *testing.T) {
 	}
 }
 
+func TestParseArgsDefaultPills(t *testing.T) {
+	opts, err := parseArgs("marquee", []string{"--", "bin/dev"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if got := strings.Join(opts.pills, ","); got != "branch,dirty,worktree,pr" {
+		t.Errorf("pills = %q, want branch,dirty,worktree,pr", got)
+	}
+}
+
+func TestParseArgsPillsSubsetPreservesOrder(t *testing.T) {
+	opts, err := parseArgs("marquee", []string{"--pills", "worktree,branch", "--", "bin/dev"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs(--pills): %v", err)
+	}
+	if got := strings.Join(opts.pills, ","); got != "worktree,branch" {
+		t.Errorf("pills = %q, want worktree,branch", got)
+	}
+}
+
+func TestParseArgsPillsEmptyHidesAll(t *testing.T) {
+	opts, err := parseArgs("marquee", []string{"--pills", "", "--", "bin/dev"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs(--pills \"\"): %v", err)
+	}
+	if len(opts.pills) != 0 {
+		t.Errorf("pills = %v, want empty", opts.pills)
+	}
+}
+
+func TestParseArgsInvalidPill(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseArgs("marquee", []string{"--pills", "branch,nope", "--", "bin/dev"}, &buf)
+	if err == nil {
+		t.Fatal("parseArgs accepted an unknown pill")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "invalid --pills") {
+		t.Errorf("missing error message: %q", out)
+	}
+	for _, id := range []string{"branch", "dirty", "worktree", "pr"} {
+		if !strings.Contains(out, id) {
+			t.Errorf("error message does not list %q: %q", id, out)
+		}
+	}
+}
+
+func TestParseArgsDuplicatePill(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := parseArgs("marquee", []string{"--pills", "branch,branch", "--", "bin/dev"}, &buf)
+	if err == nil {
+		t.Fatal("parseArgs accepted a duplicate pill")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "invalid --pills") {
+		t.Errorf("missing error message: %q", out)
+	}
+	for _, id := range []string{"branch", "dirty", "worktree", "pr"} {
+		if !strings.Contains(out, id) {
+			t.Errorf("error message does not list %q: %q", id, out)
+		}
+	}
+}
+
 func TestParseArgsMissingCommand(t *testing.T) {
 	_, err := parseArgs("marquee", nil, io.Discard)
 	if err == nil {

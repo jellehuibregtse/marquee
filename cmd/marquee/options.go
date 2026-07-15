@@ -62,12 +62,55 @@ func validTheme(t string) bool {
 
 const validThemes = "default, midnight, sand, forest"
 
+// pillsUsage documents the --pills list; validPill enforces each id and
+// validPills renders the four ids for the error message. The list order is the
+// render order, an omitted id is hidden, and an empty value hides all pills.
+const pillsUsage = "which info pills to show, comma-separated over branch,dirty,worktree,pr (list order = render order; omit an id to hide it; empty hides all)"
+
+const defaultPills = "branch,dirty,worktree,pr"
+
+func validPill(p string) bool {
+	switch p {
+	case "branch", "dirty", "worktree", "pr":
+		return true
+	default:
+		return false
+	}
+}
+
+const validPills = "branch, dirty, worktree, pr"
+
+// parsePills turns the --pills CSV into an ordered slice. An empty value is
+// valid and yields no pills (all hidden). An unknown id or a duplicate is a
+// usage error whose message lists the four valid ids.
+func parsePills(raw string) ([]string, error) {
+	if raw == "" {
+		return []string{}, nil
+	}
+	parts := strings.Split(raw, ",")
+	pills := make([]string, 0, len(parts))
+	seen := make(map[string]bool, len(parts))
+	for _, part := range parts {
+		id := strings.TrimSpace(part)
+		if !validPill(id) {
+			return nil, fmt.Errorf("invalid --pills %q: unknown pill %q: must be one of %s", raw, id, validPills)
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("invalid --pills %q: duplicate pill %q; each of %s may appear at most once", raw, id, validPills)
+		}
+		seen[id] = true
+		pills = append(pills, id)
+	}
+	return pills, nil
+}
+
 type options struct {
 	listen       string
 	internalPort int
 	position     string
 	size         string
 	theme        string
+	pills        []string
 	noOpen       bool
 	quiet        bool
 	allowHosts   []string
@@ -98,6 +141,8 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.StringVar(&opts.position, "position", "bottom-left", positionUsage)
 	fs.StringVar(&opts.size, "size", "medium", sizeUsage)
 	fs.StringVar(&opts.theme, "theme", "default", themeUsage)
+	var pillsRaw string
+	fs.StringVar(&pillsRaw, "pills", defaultPills, pillsUsage)
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the app is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -127,6 +172,12 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 		_, _ = fmt.Fprintf(out, "marquee: invalid --theme %q: must be one of %s\n", opts.theme, validThemes)
 		return nil, errUsage
 	}
+	pills, err := parsePills(pillsRaw)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "marquee: %v\n", err)
+		return nil, errUsage
+	}
+	opts.pills = pills
 	if !opts.showVersion && len(opts.command) == 0 {
 		fs.Usage()
 		return nil, errUsage
@@ -144,6 +195,7 @@ type attachOptions struct {
 	position     string
 	size         string
 	theme        string
+	pills        []string
 	noOpen       bool
 	quiet        bool
 	allowHosts   []string
@@ -160,6 +212,8 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 	fs.StringVar(&opts.position, "position", "bottom-left", positionUsage)
 	fs.StringVar(&opts.size, "size", "medium", sizeUsage)
 	fs.StringVar(&opts.theme, "theme", "default", themeUsage)
+	var pillsRaw string
+	fs.StringVar(&pillsRaw, "pills", defaultPills, pillsUsage)
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the upstream is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -188,6 +242,12 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 		_, _ = fmt.Fprintf(out, "marquee: invalid --theme %q: must be one of %s\n", opts.theme, validThemes)
 		return nil, errUsage
 	}
+	pills, err := parsePills(pillsRaw)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "marquee: %v\n", err)
+		return nil, errUsage
+	}
+	opts.pills = pills
 	u, err := parseUpstream(opts.upstream)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "marquee: %v\n", err)

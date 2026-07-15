@@ -46,6 +46,42 @@ a.chip {
   color: inherit;
   text-decoration: underline;
 }
+/* The PR slot holds a fixed width whether it shows the resolved PR chip or the
+   pending skeleton, so the switcher and toggle to its right never change
+   x-position when the async PR poll resolves after first paint. */
+.pr {
+  box-sizing: border-box;
+  width: var(--mq-pr-width, 118px);
+}
+.pr-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr.skeleton {
+  background-image: linear-gradient(
+    100deg,
+    rgba(0, 0, 0, 0) 30%,
+    rgba(0, 0, 0, 0.12) 50%,
+    rgba(0, 0, 0, 0) 70%
+  );
+  background-repeat: no-repeat;
+  background-size: 200% 100%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pr.skeleton {
+    animation: marquee-shimmer 1.4s linear infinite;
+  }
+}
+@keyframes marquee-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
 .toggle {
   display: inline-flex;
   align-items: center;
@@ -81,6 +117,14 @@ a:focus-visible {
   }
   .chip {
     background: rgba(255, 255, 255, 0.12);
+  }
+  .pr.skeleton {
+    background-image: linear-gradient(
+      100deg,
+      rgba(255, 255, 255, 0) 30%,
+      rgba(255, 255, 255, 0.18) 50%,
+      rgba(255, 255, 255, 0) 70%
+    );
   }
 }
 @media (prefers-reduced-motion: no-preference) {
@@ -226,7 +270,7 @@ const TEMPLATE = `
     <span class="chip branch"></span>
     <span class="dirty" hidden><span aria-hidden="true">●</span><span class="visually-hidden">uncommitted changes</span></span>
     <span class="chip worktree" hidden></span>
-    <a class="chip pr" hidden target="_blank" rel="noreferrer"></a>
+    <a class="chip pr" hidden target="_blank" rel="noreferrer"><span class="pr-text"></span></a>
     <span class="switcher" hidden>
       <button type="button" class="switch" aria-haspopup="menu" aria-expanded="false" aria-label="Switch worktree">
         <span class="switch-label"></span>
@@ -299,12 +343,14 @@ class MarqueeBar extends HTMLElement {
   #dirty;
   #worktree;
   #pr;
+  #prText;
   #toggle;
   #switcher;
   #switch;
   #switchLabel;
   #menu;
   #status = null;
+  #statusPolls = 0;
   #timer = 0;
   #warned = false;
   #collapsed = false;
@@ -325,6 +371,7 @@ class MarqueeBar extends HTMLElement {
     this.#dirty = this.shadowRoot.querySelector(".dirty");
     this.#worktree = this.shadowRoot.querySelector(".worktree");
     this.#pr = this.shadowRoot.querySelector(".pr");
+    this.#prText = this.shadowRoot.querySelector(".pr-text");
     this.#toggle = this.shadowRoot.querySelector(".toggle");
     this.#switcher = this.shadowRoot.querySelector(".switcher");
     this.#switch = this.shadowRoot.querySelector(".switch");
@@ -363,6 +410,7 @@ class MarqueeBar extends HTMLElement {
       const response = await fetch("/__marquee/status", { cache: "no-store" });
       if (!response.ok) throw new Error(`status ${response.status}`);
       this.#status = await response.json();
+      this.#statusPolls++;
       this.#warned = false;
       this.#render();
     } catch (error) {
@@ -398,14 +446,54 @@ class MarqueeBar extends HTMLElement {
     if (showWorktree) this.#worktree.textContent = worktree.slug;
     const pr = status.pr;
     const prHref = pr && pr.url ? safeHttpUrl(pr.url) : null;
-    const showPr = prHref !== null;
-    this.#pr.hidden = !showPr;
-    if (showPr) {
-      this.#pr.href = prHref;
-      this.#pr.textContent = `#${pr.number} ${pr.title}`;
-    }
+    this.#renderPr(pr, prHref);
     this.#renderSwitcher(status);
     this.#toggle.style.background = this.#collapsed ? colors.background : "";
+  }
+
+  // #renderPr keeps the PR slot occupying a fixed width so the switcher and
+  // toggle never shift when the async PR poll resolves. The slot has three
+  // states: a shimmer skeleton while the PR is still unknown (the first
+  // successful status can't tell "GitHub not yet queried" from "no PR"), the
+  // resolved PR chip, or — once a later poll still reports none — collapsed.
+  #renderPr(pr, prHref) {
+    const state = this.#prSlotState(prHref);
+    if (state === "present") {
+      this.#pr.hidden = false;
+      this.#pr.classList.remove("skeleton");
+      this.#pr.removeAttribute("aria-hidden");
+      this.#pr.removeAttribute("tabindex");
+      this.#pr.href = prHref;
+      const label = `#${pr.number} ${pr.title}`;
+      this.#prText.textContent = label;
+      this.#pr.title = label;
+      return;
+    }
+    if (state === "unknown") {
+      this.#pr.hidden = false;
+      this.#pr.classList.add("skeleton");
+      this.#pr.setAttribute("aria-hidden", "true");
+      this.#pr.setAttribute("tabindex", "-1");
+      this.#pr.removeAttribute("href");
+      this.#pr.removeAttribute("title");
+      this.#prText.textContent = "";
+      return;
+    }
+    this.#pr.hidden = true;
+    this.#pr.classList.remove("skeleton");
+    this.#pr.removeAttribute("aria-hidden");
+    this.#pr.removeAttribute("tabindex");
+    this.#pr.removeAttribute("href");
+    this.#pr.removeAttribute("title");
+    this.#prText.textContent = "";
+  }
+
+  #prSlotState(prHref) {
+    if (prHref !== null) return "present";
+    // No PR in this payload. On the first successful status the PR poll may
+    // still be resolving, so reserve the slot; if a later poll still reports
+    // none, treat it as genuinely absent and collapse.
+    return this.#statusPolls <= 1 ? "unknown" : "absent";
   }
 
   // #renderSwitcher shows the worktree dropdown only when there is a token

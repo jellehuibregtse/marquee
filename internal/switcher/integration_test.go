@@ -150,6 +150,13 @@ func runTestChild() {
 		// as a real dev server would when it cannot run.
 		os.Exit(1)
 	}
+	// A "blocker" file stands in for a stale process-manager socket (e.g.
+	// .overmind.sock) that makes a manager refuse to boot until it is cleared. A
+	// switch hook such as "rm -f blocker" removes it; a worktree that still has
+	// one cannot come up.
+	if _, err := os.Stat("blocker"); err == nil {
+		os.Exit(1)
+	}
 	if cwdLog := os.Getenv("CWD_LOG"); cwdLog != "" {
 		wd, _ := os.Getwd()
 		// #nosec G304 -- CWD_LOG is a test-controlled temp path, never HTTP input.
@@ -535,12 +542,13 @@ func TestIntegrationFailingSwitchHookRevertsAndStaysAlive(t *testing.T) {
 	}
 }
 
-// Contract 6: the hook runs only for the forward switch, never on the revert
-// leg. The hook appends to an absolute log and the target is made unbootable so
-// the boot (not the hook) fails and forces a revert. The hook must have run
-// exactly once — the revert into the previously-working worktree does not
-// re-run it.
-func TestIntegrationSwitchHookNotRunOnRevert(t *testing.T) {
+// Contract 6: the hook runs on BOTH legs — the forward switch and the revert.
+// The hook appends to an absolute log and the target is made unbootable so the
+// boot (not the hook) fails and forces a revert. The hook must have run twice:
+// once bootstrapping the (doomed) target, and once again on the revert so an
+// operator cleanup step can clear stale process-manager state before the
+// previous worktree restarts.
+func TestIntegrationSwitchHookRunsOnRevert(t *testing.T) {
 	hookLog := filepath.Join(t.TempDir(), "hook.log")
 	h := newIntHarnessHook(t, "echo ran >> "+hookLog)
 	// Make the target unbootable so the boot fails after a successful hook.
@@ -567,8 +575,51 @@ func TestIntegrationSwitchHookNotRunOnRevert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read hook log: %v", err)
 	}
-	if runs := len(strings.Fields(strings.TrimSpace(string(b)))); runs != 1 {
-		t.Errorf("hook ran %d times, want 1 (forward switch only, never on the revert)", runs)
+	if runs := len(strings.Fields(strings.TrimSpace(string(b)))); runs != 2 {
+		t.Errorf("hook ran %d times, want 2 (forward switch and the revert)", runs)
+	}
+}
+
+// Contract 7: the revert hook is load-bearing for recovery — it reproduces the
+// real incident. The forward switch stops the child, and its process manager
+// has left a stale socket in the previous worktree that blocks a clean reboot
+// there. Only because the revert now re-runs the hook (which clears the socket)
+// does the previous worktree come back up; without it the revert restart would
+// hit the blocker and both legs would fail, leaving the dev server dead.
+func TestIntegrationRevertHookClearsStaleBlocker(t *testing.T) {
+	h := newIntHarnessHook(t, "rm -f blocker")
+	// The previous (main) worktree carries a stale blocker, as a killed process
+	// manager would leave behind; the target simply cannot boot (deps missing),
+	// which forces the revert.
+	if err := os.WriteFile(filepath.Join(h.main, "blocker"), []byte("stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(h.target, "boot-ok")); err != nil {
+		t.Fatal(err)
+	}
+
+	// main now has an untracked blocker file, so the switch to a non-main target
+	// needs confirmation.
+	rec := h.switchTo("feature", true)
+	if rec.Code/100 == 2 {
+		t.Fatalf("status = %d, want a non-2xx failure; body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Reverted bool `json:"reverted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Reverted {
+		t.Error("reverted = false: the revert hook should have cleared the blocker so the previous worktree boots")
+	}
+	h.assertShutdownNotTriggered(t)
+	h.assertChildHealthy(t)
+	if got := h.lastChildCwd(t); got != mustEvalSymlinks(t, h.main) {
+		t.Errorf("running child cwd = %q, want the reverted main worktree %q", got, h.main)
+	}
+	if _, err := os.Stat(filepath.Join(h.main, "blocker")); !os.IsNotExist(err) {
+		t.Errorf("blocker still present in main worktree; the revert hook should have removed it (stat err = %v)", err)
 	}
 }
 

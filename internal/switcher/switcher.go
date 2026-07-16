@@ -85,8 +85,10 @@ type Config struct {
 	// run through "sh -c" so pipelines/&& work. Empty disables it. Because the
 	// hook runs before the current child is stopped, a failing hook fails the
 	// switch without touching the running child (no restart, no revert): the dev
-	// server is simply left where it was. The hook never runs on the revert leg
-	// (the previous worktree already worked).
+	// server is simply left where it was. When a switch does get far enough to
+	// stop the child and then fails, the revert re-runs the hook in the previous
+	// worktree so an operator cleanup step (e.g. "rm -f .overmind.sock") can
+	// clear stale process-manager state before the child restarts there.
 	SwitchHook string
 	// HookTimeout bounds the switch hook; defaults to 5m (bootstrapping is slow).
 	HookTimeout time.Duration
@@ -260,10 +262,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	// once. Whether the revert itself comes up healthy or not, marquee stays
 	// alive (a dead-but-alive marquee the user can retry beats one that
 	// vanished); the response always reports the switch as a failure, never a
-	// fake success. The switch hook does NOT run on the revert: the previous
-	// worktree already worked, so re-bootstrapping it is wasteful and could fail
-	// spuriously.
-	if err := h.switchInto(prevDir); err != nil {
+	// fake success.
+	if err := h.revertInto(prevDir); err != nil {
 		h.logf("revert to %q also failed: %v", prevDir, err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error":    "switch_failed",
@@ -320,6 +320,27 @@ func (h *Handler) switchInto(dir string) error {
 		h.repoint(dir)
 	}
 	return nil
+}
+
+// revertInto brings the child back to the previous, already-working worktree
+// after a failed forward switch. It runs the switch hook there first — unlike a
+// plain switchInto. The forward attempt stopped the old child, and its process
+// manager (overmind, tmux) may have left a stale socket (e.g. .overmind.sock)
+// that makes a clean reboot in the previous worktree fail ("already running").
+// An operator hook such as "rm -f .overmind.sock" clears that so the revert can
+// actually come back up. Re-bootstrapping a worktree that already worked is a
+// little wasteful, but that cost is minor next to leaving the dev server dead.
+// The hook is operator CLI input, never request-derived (see docs/security.md,
+// Threat 4), so running it on the revert widens no attack surface. A hook
+// failure here is logged, not fatal: the previous worktree already booted once,
+// so recovery still attempts the restart rather than stranding the user on a
+// spurious hook error — if the restart then fails, the both-failed path reports
+// it honestly.
+func (h *Handler) revertInto(dir string) error {
+	if err := h.runSwitchHook(dir); err != nil {
+		h.logf("revert switch-hook in %q failed; restarting the previously-working worktree anyway: %v", dir, err)
+	}
+	return h.switchInto(dir)
 }
 
 // runSwitchHook runs the operator's switch hook in the target worktree so a

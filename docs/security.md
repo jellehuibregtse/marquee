@@ -232,8 +232,12 @@ is deliberate — operators write pipelines and `&&` chains — and carries a
 justified `#nosec G204` recording that `hookCmd` is operator-only. Because the
 hook runs before the current child is stopped, a failing hook (non-zero exit or
 timeout) fails the switch without touching the running child — no restart, no
-revert — and the hook never runs on the revert leg. See the "Worktree switch
-endpoint" section for where it sits in the guard/switch sequence.
+revert. When a switch does get far enough to stop the child before failing, the
+revert re-runs the hook in the previous worktree — still the operator's own CLI
+command, cwd set to git's own worktree path — so a cleanup step can clear stale
+process-manager state before the child restarts there; this reuses the same
+operator-only command and adds no request-derived input. See the "Worktree
+switch endpoint" section for where it sits in the guard/switch sequence.
 
 The one signal-adjacent path from v1 — the stale-child pidfile warning — is
 hardened against corrupt input: see Threat 7's pidfile note.
@@ -560,9 +564,17 @@ child**: no restart into the target, and no revert either — bouncing a server
 that never moved would be pointless work that can itself race a restart into a
 stale process-manager socket and leave the dev server dead after a harmless hook
 error. The response is `switch_failed` (never `{"ok":true}`), the dev server
-left running exactly where it was. The hook runs **only for the forward
-switch**, never on the revert — the previous worktree already worked, so
-re-bootstrapping it would be wasteful and could fail spuriously.
+left running exactly where it was. When a switch instead fails **after** the
+child has been stopped (a failed boot, health timeout, or dead child), the
+revert **re-runs the hook** in the previous worktree before restarting the child
+there. The forward stop can leave the previous worktree's process manager with a
+stale socket (e.g. `.overmind.sock`) that blocks a clean reboot ("already
+running"); an operator hook such as `rm -f .overmind.sock` clears it so the
+revert actually recovers. Re-bootstrapping a worktree that already worked is
+mildly wasteful, but that cost is minor next to a dead dev server, and a hook
+failure on the revert is only logged (not fatal) so recovery still attempts the
+restart. The hook is operator-only CLI input either way, so running it on the
+revert widens no attack surface.
 
 **Reclaiming the internal port on a switch (kill-by-port).** marquee stops the
 child by killing its whole process group. A manager such as `overmind` or a
@@ -601,10 +613,13 @@ and any stale manager socket (e.g. `.overmind.sock`) that marquee does not touch
 operator cleanup, which the switch hook can do: for example
 `--switch-hook="rm -f .overmind.sock && bundle install && pnpm install"` clears a
 stale socket (which would otherwise make the manager refuse to start) and
-installs dependencies before the target boots. If the target still cannot come
-up, the switch now takes the revert / both-fail path **cleanly** (marquee stays
-alive, reports `switch_failed`, the user can recover) rather than being fooled by
-the stale listener into a fake success that later shuts marquee down.
+installs dependencies before the target boots. The hook runs the **same cleanup
+on the revert leg**, so a forward stop that stranded a stale socket in the
+previous worktree no longer blocks the revert from bringing that worktree back
+up. If the target still cannot come up, the switch takes the revert / both-fail
+path **cleanly** (marquee stays alive, reports `switch_failed`, the user can
+recover) rather than being fooled by the stale listener into a fake success that
+later shuts marquee down.
 
 Known limitation (accepted): a switch's managed window suppresses child-exit
 shutdown until it closes. If a just-health-checked child dies in the sub-
@@ -627,10 +642,13 @@ registers no switch endpoint. Golden fixtures stay valid because the token-less
 snippet is byte-identical to before; the tokened case is asserted separately
 with a fixed token, and no golden encodes the random value.
 
-- Code: `internal/switcher/switcher.go` (whole file — `Handler.serve`,
-  `switchInto` for the (hook→)restart→health→**live-child**→repoint step and the
-  single revert, the `ChildAlive` check that fails a switch to an exited child,
-  `runSwitchHook` for the operator hook run in the target worktree);
+- Code: `internal/switcher/switcher.go` (whole file — `Handler.serve` running
+  the hook before the child is stopped (a hook failure leaves the child
+  untouched), `switchInto` for the restart→health→**live-child**→repoint step,
+  `revertInto` for the single revert that re-runs the hook in the previous
+  worktree, the `ChildAlive` check that fails a switch to an exited child,
+  `runSwitchHook` for the operator hook run in the target — and, on a revert, the
+  previous — worktree);
   `Runner.Terminated`, `Runner.BeginManaged`/`EndManaged`, the managed window in
   `Runner.Restart`, `Runner.ReclaimPortOnRestart` and `freeLoopbackPort` /
   `loopbackListeners` / `reapListener` (the kill-by-port reclaim), and the
@@ -668,8 +686,11 @@ with a fixed token, and no golden encodes the random value.
   (a failing hook restarts nothing — not the target and not a bounce of the
   healthy child — and leaves the managed window balanced), `TestIntegrationFailingSwitchHookRevertsAndStaysAlive`
   (a failing hook reverts, stays alive, and never boots the target),
-  `TestIntegrationSwitchHookNotRunOnRevert` (the hook runs exactly once — forward
-  only) in `internal/switcher/integration_test.go` (each asserts the shutdown
+  `TestIntegrationSwitchHookRunsOnRevert` (the hook runs on both legs — forward
+  and revert), `TestIntegrationRevertHookClearsStaleBlocker` (the revert hook is
+  load-bearing: it clears a stale-socket-shaped blocker in the previous worktree
+  so the revert recovers, reproducing the real incident) in
+  `internal/switcher/integration_test.go` (each asserts the shutdown
   signal is or is not triggered against the real process lifecycle); the runner-level
   lifecycle tests `TestTerminatedFiresOnUnmanagedExit` (wrapper-mode regression),
   `TestTerminatedNotFiredDuringRestart` (`-race`),

@@ -235,6 +235,20 @@ a:focus-visible {
   outline: 2px solid #3b82f6;
   outline-offset: 2px;
 }
+/* A failed switch tints the control so the failure is visible in the bar
+   itself, not only in the console. The accent is a fixed red rather than a
+   themed custom property because it signals an exceptional state, and it clears
+   the moment the next switch attempt starts. */
+.switch.switch-error {
+  color: #b91c1c;
+  border-color: #b91c1c;
+}
+@media (prefers-color-scheme: dark) {
+  .switch.switch-error {
+    color: #fca5a5;
+    border-color: #fca5a5;
+  }
+}
 .switch-caret {
   font-size: calc(9px * var(--mq-scale, 1));
   line-height: 1;
@@ -448,6 +462,7 @@ class MarqueeBar extends HTMLElement {
   #collapsed = false;
   #token = "";
   #switching = false;
+  #switchError = "";
   #menuOpen = false;
   #dark = window.matchMedia("(prefers-color-scheme: dark)");
   #onSchemeChange = () => this.#render();
@@ -689,7 +704,18 @@ class MarqueeBar extends HTMLElement {
     }
     this.#switch.removeAttribute("aria-busy");
     this.#switch.disabled = false;
-    this.#switchLabel.textContent = "Worktrees";
+    // A failed switch surfaces its message on the still-operable control so the
+    // user sees it in the bar and can retry; the accent and text clear when the
+    // next attempt begins. A healthy switcher just reads "Worktrees".
+    if (this.#switchError) {
+      this.#switch.classList.add("switch-error");
+      this.#switch.title = this.#switchError;
+      this.#switchLabel.textContent = this.#switchError;
+    } else {
+      this.#switch.classList.remove("switch-error");
+      this.#switch.removeAttribute("title");
+      this.#switchLabel.textContent = "Worktrees";
+    }
     this.#buildMenu(worktrees, status.worktree);
   }
 
@@ -800,7 +826,18 @@ class MarqueeBar extends HTMLElement {
   async #switchTo(slug, confirmed) {
     if (this.#token === "" || this.#switching) return;
     this.#switching = true;
+    // A fresh attempt clears any error left by the previous one, so the bar
+    // shows the live busy state instead of a stale "Switch failed".
+    this.#switchError = "";
     this.#render();
+    // The dirty-worktree confirm is deferred until AFTER this try/finally
+    // unwinds, never recursed into from inside it. Returning #switchTo(…, true)
+    // from within the try would run this finally — flipping #switching back to
+    // false — while the confirmed retry is still in flight, so the next 5s poll
+    // repainted the idle switcher and the long confirmed switch looked like it
+    // did nothing. Deciding here and retrying below keeps the confirmed switch
+    // a clean, fresh call with its own busy lifecycle.
+    let needsConfirm = false;
     try {
       const body = confirmed ? { slug, confirm: true } : { slug };
       const response = await fetch("/__marquee/switch", {
@@ -817,32 +854,38 @@ class MarqueeBar extends HTMLElement {
         // healthy, so the new server is already serving this origin. A full
         // reload swaps the PAGE over to it; #poll alone refreshes the bar text
         // but leaves the old worktree's content on screen until a manual
-        // refresh — which is exactly what the user hit. Return before the
-        // finally so nothing repaints the bar during the unload.
+        // refresh. Return before the finally so nothing repaints during unload.
         location.reload();
         return;
       }
       if (response.status === 409) {
         const data = await response.json().catch(() => null);
         if (data && data.error === "dirty" && !confirmed) {
-          this.#switching = false;
-          if (window.confirm(`This worktree has uncommitted changes. Switch to ${slug} anyway?`)) {
-            return this.#switchTo(slug, true);
-          }
-          this.#render();
-          return;
+          needsConfirm = true;
+        } else {
+          this.#switchError = "Switch rejected";
+          console.warn("marquee: switch rejected", data);
         }
-        console.warn("marquee: switch rejected", data);
-      } else if (!response.ok) {
+      } else {
+        this.#switchError = "Switch failed";
         console.warn("marquee: switch failed", response.status);
       }
     } catch (error) {
+      this.#switchError = "Switch failed";
       console.warn("marquee: switch request failed", error);
     } finally {
       this.#switching = false;
     }
-    // Refresh promptly so the bar reflects the new worktree (or recovers the
-    // idle switcher if the switch was refused).
+    if (needsConfirm && window.confirm(`This worktree has uncommitted changes. Switch to ${slug} anyway?`)) {
+      // A confirmed retry is a brand-new switch: it re-enters with #switching
+      // false, shows its own busy state, and reloads on success — identical to
+      // a switch from a clean worktree.
+      this.#switchTo(slug, true);
+      return;
+    }
+    // Refresh promptly so the bar recovers the idle switcher when the switch was
+    // refused, or shows the failure accent that #switchError set above so the
+    // user can retry.
     this.#poll();
   }
 

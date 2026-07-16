@@ -3,6 +3,11 @@ import { PANEL_CSS, createSettingsPanel } from "./settings.js";
 
 const STORAGE_KEY = "marquee-bar-collapsed";
 const POLL_INTERVAL_MS = 5000;
+// While a switch runs the bar polls status fast to learn the moment the new
+// worktree is being served; the timeout is generous because the switch hook can
+// run a full bundle/pnpm install before the child even restarts.
+const SWITCH_POLL_INTERVAL_MS = 500;
+const SWITCH_READY_TIMEOUT_MS = 150000;
 
 const CSS = `
 :host {
@@ -341,6 +346,55 @@ a:focus-visible {
     transform: rotate(360deg);
   }
 }
+/* The switch overlay is a viewport-filling scrim that covers the whole page
+   while a worktree switch runs (hook, restart, health wait). It is a fixed
+   child of the shadow root — not of the corner-anchored .wrap — so it spans the
+   viewport regardless of where the bar sits, and it rides the host's near-max
+   stacking context so it paints above all page content and swallows every click
+   until the switch resolves or fails. */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+.overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(12px * var(--mq-scale, 1));
+  max-width: 80vw;
+  padding: calc(20px * var(--mq-scale, 1)) calc(28px * var(--mq-scale, 1));
+  border-radius: calc(12px * var(--mq-scale, 1));
+  background: var(--mq-bg);
+  color: var(--mq-fg);
+  border: 1px solid var(--mq-border);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+  font-size: calc(13px * var(--mq-scale, 1));
+  text-align: center;
+}
+.overlay-spinner {
+  flex: none;
+  width: calc(28px * var(--mq-scale, 1));
+  height: calc(28px * var(--mq-scale, 1));
+  border: 3px solid var(--mq-border);
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .overlay-spinner {
+    animation: marquee-spin 0.7s linear infinite;
+  }
+}
+.overlay-text {
+  overflow-wrap: anywhere;
+}
 @media (prefers-color-scheme: dark) {
   .menu button:hover,
   .menu button:focus-visible {
@@ -370,6 +424,12 @@ const TEMPLATE = `
     <div class="settings-menu" id="marquee-settings-menu" role="group" aria-label="Bar settings" hidden></div>
   </span>
   <button type="button" class="toggle"></button>
+</div>
+<div class="overlay" role="alert" aria-live="assertive" hidden>
+  <div class="overlay-card">
+    <span class="overlay-spinner" aria-hidden="true"></span>
+    <span class="overlay-text"></span>
+  </div>
 </div>
 `;
 
@@ -410,6 +470,10 @@ function branchColors(branch, dark) {
     background: `hsl(${hue} 60% ${lightness}%)`,
     text: blackContrast >= whiteContrast ? "#000" : "#fff",
   };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function textSpan(text) {
@@ -453,6 +517,8 @@ class MarqueeBar extends HTMLElement {
   #menu;
   #gear;
   #settingsMenu;
+  #overlay;
+  #overlayText;
   #settings;
   #storedPrefs = {};
   #status = null;
@@ -486,6 +552,8 @@ class MarqueeBar extends HTMLElement {
     this.#menu = this.shadowRoot.querySelector(".menu");
     this.#gear = this.shadowRoot.querySelector(".gear");
     this.#settingsMenu = this.shadowRoot.querySelector(".settings-menu");
+    this.#overlay = this.shadowRoot.querySelector(".overlay");
+    this.#overlayText = this.shadowRoot.querySelector(".overlay-text");
     this.#storedPrefs = load(localStore());
     this.#settings = createSettingsPanel({
       button: this.#gear,
@@ -829,6 +897,10 @@ class MarqueeBar extends HTMLElement {
     // A fresh attempt clears any error left by the previous one, so the bar
     // shows the live busy state instead of a stale "Switch failed".
     this.#switchError = "";
+    // The overlay goes up the instant the switch starts and stays up through the
+    // whole hook/restart/health window, so the user sees a deliberate loading
+    // state instead of a frozen page that later "sort of reloads".
+    this.#showOverlay(this.#worktreeLabel(slug));
     this.#render();
     // The dirty-worktree confirm is deferred until AFTER this try/finally
     // unwinds, never recursed into from inside it. Returning #switchTo(…, true)
@@ -850,15 +922,20 @@ class MarqueeBar extends HTMLElement {
         body: JSON.stringify(body),
       });
       if (response.ok) {
-        // The switch endpoint only returns once the target worktree's server is
-        // healthy, so the new server is already serving this origin. A full
-        // reload swaps the PAGE over to it; #poll alone refreshes the bar text
-        // but leaves the old worktree's content on screen until a manual
-        // refresh. Return before the finally so nothing repaints during unload.
-        location.reload();
-        return;
-      }
-      if (response.status === 409) {
+        // The switch endpoint returns once marquee has restarted and
+        // health-probed the child, but the status poller may still be
+        // repointing to the new worktree. Hold the overlay and poll status until
+        // it reports the target worktree running, so the reload lands on a warm
+        // server instead of hanging while it boots. The overlay stays up across
+        // the reload's unload; return before the finally so nothing repaints.
+        if (await this.#waitForWorktreeReady(slug)) {
+          this.#setOverlayText("Ready — reloading…");
+          location.reload();
+          return;
+        }
+        this.#switchError = "Switch failed";
+        console.warn("marquee: switch did not become ready before the timeout");
+      } else if (response.status === 409) {
         const data = await response.json().catch(() => null);
         if (data && data.error === "dirty" && !confirmed) {
           needsConfirm = true;
@@ -876,6 +953,10 @@ class MarqueeBar extends HTMLElement {
     } finally {
       this.#switching = false;
     }
+    // Every path that reaches here is not reloading — the switch was refused,
+    // failed, timed out, or is waiting on the dirty confirm — so tear the
+    // overlay down. Fail-open: the overlay must never leave the page blocked.
+    this.#hideOverlay();
     if (needsConfirm && window.confirm(`This worktree has uncommitted changes. Switch to ${slug} anyway?`)) {
       // A confirmed retry is a brand-new switch: it re-enters with #switching
       // false, shows its own busy state, and reloads on success — identical to
@@ -887,6 +968,63 @@ class MarqueeBar extends HTMLElement {
     // refused, or shows the failure accent that #switchError set above so the
     // user can retry.
     this.#poll();
+  }
+
+  // #waitForWorktreeReady polls status fast until it reports the target
+  // worktree running, or gives up at the timeout. Readiness is two signals from
+  // the status payload: the poller has repointed to the target slug (only
+  // happens after a fully successful switch) AND the child process is running,
+  // so the reload never lands on a half-restarted server. Transient fetch
+  // failures during the child restart are expected and simply retried.
+  async #waitForWorktreeReady(slug) {
+    const deadline = Date.now() + SWITCH_READY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch("/__marquee/status", {
+          cache: "no-store",
+          headers: { "X-Marquee-Token": this.#token },
+        });
+        if (response.ok && this.#worktreeReady(await response.json(), slug)) {
+          return true;
+        }
+      } catch {
+        // The child is mid-restart; keep polling until the deadline.
+      }
+      await delay(SWITCH_POLL_INTERVAL_MS);
+    }
+    return false;
+  }
+
+  #worktreeReady(status, slug) {
+    return Boolean(
+      status &&
+        status.worktree &&
+        status.worktree.slug === slug &&
+        status.child &&
+        status.child.state === "running",
+    );
+  }
+
+  // #worktreeLabel prefers the target's branch name for the overlay text and
+  // falls back to the slug, so the user reads "Switching to <branch>…".
+  #worktreeLabel(slug) {
+    const worktrees =
+      this.#status && Array.isArray(this.#status.worktrees) ? this.#status.worktrees : [];
+    const match = worktrees.find((worktree) => worktree && worktree.slug === slug);
+    return match && match.branch ? match.branch : slug;
+  }
+
+  #showOverlay(label) {
+    this.#setOverlayText(`Switching to ${label}…`);
+    this.#overlay.hidden = false;
+  }
+
+  #setOverlayText(text) {
+    this.#overlayText.textContent = text;
+  }
+
+  #hideOverlay() {
+    this.#overlay.hidden = true;
   }
 
   #onToggle() {

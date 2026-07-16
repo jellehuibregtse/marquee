@@ -426,11 +426,12 @@ func TestIntegrationBothFailStaysAlive(t *testing.T) {
 	h.assertChildDown(t)
 }
 
-// A failing hook must revert through the existing revert path without ever
-// restarting the child in the target. Uses the fakeRunner so the exact restart
-// sequence is observable: only the revert into the previous worktree, never the
-// target, and the managed window stays balanced.
-func TestSwitchHookFailureRevertsWithoutTargetRestart(t *testing.T) {
+// A failing hook must leave the running child completely untouched: the hook
+// runs before the old child is ever stopped, so a failure there restarts
+// nothing — not the target, and not a needless bounce of the healthy previous
+// worktree. Uses the fakeRunner so the exact (empty) restart sequence is
+// observable, and the managed window still balances.
+func TestSwitchHookFailureLeavesChildUntouched(t *testing.T) {
 	runner := &fakeRunner{}
 	repoint := &repointTracker{}
 	h := newHarness(t, switcher.Config{
@@ -447,20 +448,25 @@ func TestSwitchHookFailureRevertsWithoutTargetRestart(t *testing.T) {
 		t.Errorf("error = %q, want %q", code, "switch_failed")
 	}
 	var body struct {
+		OK       bool `json:"ok"`
 		Reverted bool `json:"reverted"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
+	if body.OK {
+		t.Error("a failed hook reported ok:true")
+	}
 	if !body.Reverted {
-		t.Error("reverted = false, but the revert into the previous worktree should succeed")
+		t.Error("reverted = false, but the child was left on the previous, working worktree")
 	}
-	// The hook failed before any Restart(target); only the revert restarts.
-	if got := runner.restarts(); len(got) != 1 || got[0] != "/repo/main" {
-		t.Errorf("restarts = %v, want [/repo/main] (target never restarted; revert only)", got)
+	// The hook fails before the child is ever stopped: no restart at all — not
+	// the target, and not a pointless bounce of the still-healthy child.
+	if n := runner.count(); n != 0 {
+		t.Errorf("runner restarted %d times, want 0 (hook failed before any process action)", n)
 	}
-	if got := repoint.calls(); len(got) != 1 || got[0] != "/repo/main" {
-		t.Errorf("repoint calls = %v, want [/repo/main]", got)
+	if n := len(repoint.calls()); n != 0 {
+		t.Errorf("repoint called %d times, want 0", n)
 	}
 	if runner.managedDepth() != 0 {
 		t.Errorf("managed depth = %d after serve, want 0 (window must be balanced)", runner.managedDepth())

@@ -812,6 +812,16 @@ class MarqueeBar extends HTMLElement {
         },
         body: JSON.stringify(body),
       });
+      if (response.ok) {
+        // The switch endpoint only returns once the target worktree's server is
+        // healthy, so the new server is already serving this origin. A full
+        // reload swaps the PAGE over to it; #poll alone refreshes the bar text
+        // but leaves the old worktree's content on screen until a manual
+        // refresh — which is exactly what the user hit. Return before the
+        // finally so nothing repaints the bar during the unload.
+        location.reload();
+        return;
+      }
       if (response.status === 409) {
         const data = await response.json().catch(() => null);
         if (data && data.error === "dirty" && !confirmed) {

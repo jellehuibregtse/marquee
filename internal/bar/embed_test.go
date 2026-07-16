@@ -64,6 +64,10 @@ func TestBarScriptEmbedded(t *testing.T) {
 		// dirty-refusal confirm path.
 		"/__marquee/switch",
 		"X-Marquee-Token",
+		// A successful switch reloads the whole page: the endpoint only returns
+		// once the target server is healthy, so the reload lands on the new
+		// worktree's content rather than leaving the old page on screen.
+		"location.reload()",
 		`getAttribute("token")`,
 		`aria-haspopup="menu"`,
 		`role="menu"`,

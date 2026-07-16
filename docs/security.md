@@ -229,10 +229,11 @@ runs the hook with `exec.CommandContext(ctx, "sh", "-c", hookCmd)` and its `cwd`
 set to git's own worktree path (never a request-derived path), so it introduces
 no new way for HTTP input to choose a command or a directory. The `sh -c` form
 is deliberate — operators write pipelines and `&&` chains — and carries a
-justified `#nosec G204` recording that `hookCmd` is operator-only. A failing
-hook (non-zero exit or timeout) fails the switch and reverts, and the hook never
-runs on the revert leg. See the "Worktree switch endpoint" section for where it
-sits in the guard/switch sequence.
+justified `#nosec G204` recording that `hookCmd` is operator-only. Because the
+hook runs before the current child is stopped, a failing hook (non-zero exit or
+timeout) fails the switch without touching the running child — no restart, no
+revert — and the hook never runs on the revert leg. See the "Worktree switch
+endpoint" section for where it sits in the guard/switch sequence.
 
 The one signal-adjacent path from v1 — the stale-child pidfile warning — is
 hardened against corrupt input: see Threat 7's pidfile note.
@@ -552,13 +553,16 @@ path) **before** the child is restarted there, via
 window and busy lock as the rest of the switch. Its stdout and stderr are
 streamed to marquee's stderr, prefixed `switch-hook: …`, so the operator sees
 progress and errors. It is **off by default** and, as Threat 4 records, is
-operator-only CLI input — never influenced by the HTTP request or the slug. A
-hook failure (non-zero exit or timeout) reuses the **same revert path** a failed
-boot uses: the child is never restarted in the target, marquee reverts to the
-previous worktree, and the response is `switch_failed` (never `{"ok":true}`),
-marquee still alive. The hook runs **only for the forward switch**, never on the
-revert — the previous worktree already worked, so re-bootstrapping it would be
-wasteful and could fail spuriously.
+operator-only CLI input — never influenced by the HTTP request or the slug.
+Because the hook runs **before the current child is stopped**, a hook failure
+(non-zero exit or timeout) fails the switch **without touching the running
+child**: no restart into the target, and no revert either — bouncing a server
+that never moved would be pointless work that can itself race a restart into a
+stale process-manager socket and leave the dev server dead after a harmless hook
+error. The response is `switch_failed` (never `{"ok":true}`), the dev server
+left running exactly where it was. The hook runs **only for the forward
+switch**, never on the revert — the previous worktree already worked, so
+re-bootstrapping it would be wasteful and could fail spuriously.
 
 **Reclaiming the internal port on a switch (kill-by-port).** marquee stops the
 child by killing its whole process group. A manager such as `overmind` or a
@@ -660,9 +664,9 @@ with a fixed token, and no golden encodes the random value.
   `TestIntegrationDaemonPortFreedSwitchSucceeds` (the escaped listener is reaped
   so the healthy target's new child binds the freed port and truly serves it),
   `TestIntegrationSwitchHookRunsInTargetWorktree` (the hook's marker lands in the
-  target worktree and the child then boots there), `TestSwitchHookFailureRevertsWithoutTargetRestart`
-  (a failing hook reverts via the existing path, restarting only the previous
-  worktree, window balanced), `TestIntegrationFailingSwitchHookRevertsAndStaysAlive`
+  target worktree and the child then boots there), `TestSwitchHookFailureLeavesChildUntouched`
+  (a failing hook restarts nothing — not the target and not a bounce of the
+  healthy child — and leaves the managed window balanced), `TestIntegrationFailingSwitchHookRevertsAndStaysAlive`
   (a failing hook reverts, stays alive, and never boots the target),
   `TestIntegrationSwitchHookNotRunOnRevert` (the hook runs exactly once — forward
   only) in `internal/switcher/integration_test.go` (each asserts the shutdown

@@ -82,9 +82,11 @@ type Config struct {
 	// worktree (cwd = git's own worktree path) before the child is restarted
 	// there, so a fresh worktree can be bootstrapped (e.g. "bundle install").
 	// It is CLI input, never influenced by the HTTP request or the slug, and is
-	// run through "sh -c" so pipelines/&& work. Empty disables it. A failing
-	// hook fails the switch and reverts, exactly like a failed boot; the hook
-	// never runs on the revert leg (the previous worktree already worked).
+	// run through "sh -c" so pipelines/&& work. Empty disables it. Because the
+	// hook runs before the current child is stopped, a failing hook fails the
+	// switch without touching the running child (no restart, no revert): the dev
+	// server is simply left where it was. The hook never runs on the revert leg
+	// (the previous worktree already worked).
 	SwitchHook string
 	// HookTimeout bounds the switch hook; defaults to 5m (bootstrapping is slow).
 	HookTimeout time.Duration
@@ -223,7 +225,25 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	h.setSwitching(target.Slug)
 	defer h.setSwitching("")
 
-	switchErr := h.switchInto(target.Path, true)
+	// Bootstrap the target BEFORE the current child is stopped. The hook runs
+	// while the old child is still up and untouched, so a hook failure here has
+	// stopped nothing and there is nothing to recover: report the failure and
+	// leave the healthy child exactly where it is. A revert restart at this
+	// point would be pointless work that can itself race its own teardown into a
+	// stale process-manager socket and leave the dev server dead after what was
+	// only a harmless hook failure.
+	if err := h.runSwitchHook(target.Path); err != nil {
+		h.logf("switch to %q failed in switch-hook: %v; left the child running in %q untouched", target.Slug, err, prevDir)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":    "switch_failed",
+			"reverted": true,
+			"slug":     target.Slug,
+			"message":  "switch-hook failed before the switch began; the dev server was left running on the previous worktree",
+		})
+		return
+	}
+
+	switchErr := h.switchInto(target.Path)
 	if switchErr == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":     true,
@@ -235,13 +255,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	h.logf("switch to %q failed: %v; reverting to %q", target.Slug, switchErr, prevDir)
 
-	// Revert exactly once, back to the previous worktree. Whether the revert
-	// itself comes up healthy or not, marquee stays alive (a dead-but-alive
-	// marquee the user can retry beats one that vanished); the response always
-	// reports the switch as a failure, never a fake success. The switch hook
-	// does NOT run on the revert: the previous worktree already worked, so
-	// re-bootstrapping it is wasteful and could fail spuriously.
-	if err := h.switchInto(prevDir, false); err != nil {
+	// The forward attempt failed only after it had already stopped the old
+	// child, so recover by restarting the previous worktree. Revert exactly
+	// once. Whether the revert itself comes up healthy or not, marquee stays
+	// alive (a dead-but-alive marquee the user can retry beats one that
+	// vanished); the response always reports the switch as a failure, never a
+	// fake success. The switch hook does NOT run on the revert: the previous
+	// worktree already worked, so re-bootstrapping it is wasteful and could fail
+	// spuriously.
+	if err := h.switchInto(prevDir); err != nil {
 		h.logf("revert to %q also failed: %v", prevDir, err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error":    "switch_failed",
@@ -259,19 +281,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// switchInto optionally runs the switch hook in dir, then restarts the child
-// there and waits for it to become healthy. On success it repoints the pollers
-// and records dir as the current worktree; on failure (the hook errored, the
-// restart could not start, or the child never became healthy) it returns the
-// error and leaves currentDir untouched so a revert restores it. runHook is
-// true only for the forward switch into the target — never for the revert.
-func (h *Handler) switchInto(dir string, runHook bool) error {
-	if runHook {
-		if err := h.runSwitchHook(dir); err != nil {
-			return err
-		}
-	}
-
+// switchInto restarts the child in dir and waits for it to become healthy. On
+// success it repoints the pollers and records dir as the current worktree; on
+// failure (the restart could not start, or the child never became healthy) it
+// returns the error and leaves currentDir untouched so a revert restores it. It
+// deliberately does NOT run the switch hook: bootstrapping happens once, before
+// the child is stopped (see serve), so a hook failure is handled there and
+// never reaches this restart step.
+func (h *Handler) switchInto(dir string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), h.restartTimeout)
 	defer cancel()
 	if err := h.runner.Restart(ctx, dir); err != nil {

@@ -68,6 +68,18 @@ func TestBarScriptEmbedded(t *testing.T) {
 		// once the target server is healthy, so the reload lands on the new
 		// worktree's content rather than leaving the old page on screen.
 		"location.reload()",
+		// Switch loading overlay: the moment a switch starts a viewport-filling
+		// scrim goes up inside the shadow DOM, and the reload is deferred until a
+		// fast status poll reports the target worktree running, so the reload hits
+		// a warm server. Any non-reload path tears the overlay down (fail-open).
+		`class="overlay"`,
+		"overlay-spinner",
+		"#showOverlay",
+		"#hideOverlay",
+		"#waitForWorktreeReady",
+		"SWITCH_POLL_INTERVAL_MS",
+		`status.child.state === "running"`,
+		"status.worktree.slug === slug",
 		// A failed switch surfaces its state in the bar — not only the console —
 		// via #switchError and the .switch-error accent, so a rejected or failed
 		// switch is visible and the control stays operable for a retry.

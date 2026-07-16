@@ -421,7 +421,7 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
       const up = document.createElement("button");
       up.type = "button";
       up.className = "settings-pill-move";
-      up.textContent = "↑";
+      up.textContent = "↑︎";
       up.setAttribute("aria-label", `Move ${PILL_LABELS[id] || id} up`);
       up.disabled = index === 0;
       up.addEventListener("click", () => {
@@ -434,7 +434,7 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
       const down = document.createElement("button");
       down.type = "button";
       down.className = "settings-pill-move";
-      down.textContent = "↓";
+      down.textContent = "↓︎";
       down.setAttribute("aria-label", `Move ${PILL_LABELS[id] || id} down`);
       down.disabled = index === order.length - 1;
       down.addEventListener("click", () => {

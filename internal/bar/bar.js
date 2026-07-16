@@ -408,19 +408,19 @@ const TEMPLATE = `
 <div class="wrap" hidden>
   <div class="bar" role="status" aria-label="Development branch information">
     <span class="chip branch"></span>
-    <span class="dirty" hidden><span aria-hidden="true">●</span><span class="visually-hidden">uncommitted changes</span></span>
+    <span class="dirty" hidden><span aria-hidden="true">●︎</span><span class="visually-hidden">uncommitted changes</span></span>
     <span class="chip worktree" hidden></span>
     <a class="chip pr" hidden target="_blank" rel="noreferrer"><span class="pr-text"></span></a>
     <span class="switcher" hidden>
       <button type="button" class="switch" aria-haspopup="menu" aria-expanded="false" aria-label="Switch worktree">
         <span class="switch-label"></span>
-        <span class="switch-caret" aria-hidden="true">▾</span>
+        <span class="switch-caret" aria-hidden="true">▾︎</span>
       </button>
       <div class="menu" role="menu" aria-label="Worktrees" hidden></div>
     </span>
   </div>
   <span class="settings">
-    <button type="button" class="gear" aria-haspopup="true" aria-expanded="false" aria-controls="marquee-settings-menu" aria-label="Bar settings">⚙</button>
+    <button type="button" class="gear" aria-haspopup="true" aria-expanded="false" aria-controls="marquee-settings-menu" aria-label="Bar settings">⚙︎</button>
     <div class="settings-menu" id="marquee-settings-menu" role="group" aria-label="Bar settings" hidden></div>
   </span>
   <button type="button" class="toggle"></button>

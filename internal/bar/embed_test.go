@@ -127,6 +127,13 @@ func TestBarScriptEmbedded(t *testing.T) {
 		"switch-caret",
 		"▾",
 		"border: 1px solid var(--mq-border)",
+		// Dark-mode icon contrast: the bar's symbol glyphs carry the U+FE0E
+		// text-presentation selector so a platform that would default them to
+		// emoji can't render them as fixed-color glyphs that ignore --mq-fg. They
+		// stay monochrome and follow the themed foreground in every scheme.
+		"⚙︎",
+		"▾︎",
+		"●︎",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("bar.js missing expected marker %q", marker)
@@ -249,6 +256,11 @@ func TestSettingsModuleEmbedded(t *testing.T) {
 		`type = "checkbox"`,
 		"↑",
 		"↓",
+		// Dark-mode icon contrast: the reorder arrows carry the U+FE0E
+		// text-presentation selector so they stay monochrome and follow the panel
+		// foreground rather than rendering as fixed-color emoji.
+		"↑︎",
+		"↓︎",
 		"syncPills",
 	} {
 		if !strings.Contains(js, marker) {

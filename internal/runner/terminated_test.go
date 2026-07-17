@@ -32,7 +32,7 @@ func assertNotTerminated(t *testing.T, r *Runner, within time.Duration) {
 // Wrapper-mode regression: a child that exits on its own (no Stop, no Restart,
 // no managed window) must fire Terminated so cmd/marquee shuts down as before.
 func TestTerminatedFiresOnUnmanagedExit(t *testing.T) {
-	r := New([]string{"sh", "-c", "exit 3"}, nil, "")
+	r := New([]string{"sh", "-c", "exit 3"}, nil, "", nil)
 	if err := r.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestTerminatedFiresOnUnmanagedExit(t *testing.T) {
 func TestTerminatedNotFiredDuringRestart(t *testing.T) {
 	dir1 := mustEvalSymlinks(t, t.TempDir())
 	dir2 := mustEvalSymlinks(t, t.TempDir())
-	r := New([]string{"sleep", "30"}, nil, dir1)
+	r := New([]string{"sleep", "30"}, nil, dir1, nil)
 	if err := r.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestTerminatedNotFiredDuringRestart(t *testing.T) {
 // window does not retroactively fire it. This is what keeps marquee alive when
 // a switch's target and revert both fail to boot.
 func TestManagedWindowSuppressesTerminatedForever(t *testing.T) {
-	r := New([]string{"sleep", "30"}, nil, "")
+	r := New([]string{"sleep", "30"}, nil, "", nil)
 	if err := r.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestManagedWindowSuppressesTerminatedForever(t *testing.T) {
 // of the new child must fire Terminated, so marquee still shuts down when the
 // dev server dies on its own after a switch (contract 4, post-switch).
 func TestTerminatedFiresAfterRestartOnNaturalDeath(t *testing.T) {
-	r := New([]string{"sleep", "30"}, nil, "")
+	r := New([]string{"sleep", "30"}, nil, "", nil)
 	if err := r.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

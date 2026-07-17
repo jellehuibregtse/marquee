@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jellehuibregtse/marquee/internal/port"
 )
 
 const (
@@ -34,23 +36,24 @@ func listenErrorMessage(addr string, err error) string {
 	return fmt.Sprintf("marquee: %s is already in use — %s", addr, occupiedPortHint)
 }
 
-// portHolder finds the process listening on the TCP port via lsof and
-// names it via ps. Both tools are optional and deadline-bound: a missing
+// portHolder finds the process listening on the TCP port via port.Listeners
+// and names it via ps. Both tools are optional and deadline-bound: a missing
 // or hung tool reports ok=false (or a nameless PID) and startup
 // diagnostics carry on without it.
-func portHolder(port string) (pid int, name string, ok bool) {
+func portHolder(portStr string) (pid int, name string, ok bool) {
+	// --listen accepts service names as well as numbers (net.Listen resolves
+	// "localhost:http"), so resolve the same way rather than only parsing digits.
+	p, err := net.LookupPort("tcp", portStr)
+	if err != nil || p <= 0 {
+		return 0, "", false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), portLookupTimeout)
 	defer cancel()
-	// #nosec G204 -- port comes from the operator-supplied --listen address (net.SplitHostPort), never from HTTP input, and lsof is a fixed argv.
-	out, err := exec.CommandContext(ctx, "lsof", "-ti", "tcp:"+port, "-sTCP:LISTEN").Output()
-	if err != nil {
+	pids, err := port.Listeners(ctx, p)
+	if err != nil || len(pids) == 0 {
 		return 0, "", false
 	}
-	first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-	pid, err = strconv.Atoi(strings.TrimSpace(first))
-	if err != nil || pid <= 0 {
-		return 0, "", false
-	}
+	pid = pids[0]
 	name = "unknown"
 	// #nosec G204 -- pid is an integer parsed from lsof output, and ps runs with a fixed argv; no value here originates from HTTP input.
 	if psOut, psErr := exec.CommandContext(ctx, "ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output(); psErr == nil {

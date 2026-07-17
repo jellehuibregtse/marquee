@@ -8,15 +8,10 @@ package runner
 import (
 	"context"
 	"errors"
-	"fmt"
-	"net"
 	"os"
 	"os/exec"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
-	"time"
 )
 
 // State describes the child process lifecycle phase.
@@ -54,21 +49,34 @@ type Runner struct {
 	done         chan struct{}
 	managedDepth int
 
-	reapPort int
-	reapLogf func(string, ...any)
+	reclaim PortReclaimer
 
 	terminated chan struct{}
 	termOnce   sync.Once
 }
 
+// PortReclaimer frees marquee's internal loopback port of any escaped remnant
+// of the old child before Restart spawns the new one. It is supplied at
+// construction rather than set afterward, so the runner never holds the port
+// and log sink as fields a later Restart reads back — the reclaim is a real
+// dependency, not a bolt-on. A nil reclaimer disables the step (attach mode and
+// most tests). internal/port supplies the production implementation; runner
+// tests pass a fake, so the reclaim is testable without a real listener.
+type PortReclaimer interface {
+	Free(ctx context.Context) error
+}
+
 // New prepares a runner for argv, with extraEnv ("KEY=value" entries)
 // merged over the parent environment, running in dir (empty means the
-// parent's working directory). Stdio is inherited from the parent.
-func New(argv []string, extraEnv []string, dir string) *Runner {
+// parent's working directory). Stdio is inherited from the parent. reclaim,
+// when non-nil, frees marquee's internal port on the restart path; pass nil to
+// disable it.
+func New(argv []string, extraEnv []string, dir string, reclaim PortReclaimer) *Runner {
 	return &Runner{
 		argv:       argv,
 		extraEnv:   extraEnv,
 		dir:        dir,
+		reclaim:    reclaim,
 		state:      StateStarting,
 		terminated: make(chan struct{}),
 	}
@@ -209,23 +217,6 @@ func (r *Runner) Stop(ctx context.Context, sig os.Signal) error {
 	return nil
 }
 
-// ReclaimPortOnRestart makes Restart free the given loopback port before it
-// spawns the new child. After the old child's process group is stopped, an
-// escaped, out-of-group remnant of it — a process manager that daemonized its
-// server into its own session (e.g. a tmux-based runner), which the group-kill
-// cannot reach — can keep squatting on marquee's internal port and stop the new
-// child from binding. Restart then polls briefly for the port to be released
-// and, only if it is still held, terminates the PID(s) listening on it so the
-// new child can bind. port <= 0 disables it (the default). logf, if non-nil,
-// receives one line per reaped PID, naming the PID and that it held the internal
-// port — never a command line or any secret.
-func (r *Runner) ReclaimPortOnRestart(port int, logf func(string, ...any)) {
-	r.mu.Lock()
-	r.reapPort = port
-	r.reapLogf = logf
-	r.mu.Unlock()
-}
-
 // Restart stops the child gracefully and spawns it again with the same
 // command and environment. A non-empty dir becomes the new working
 // directory — this is the hook the worktree switcher uses.
@@ -243,119 +234,15 @@ func (r *Runner) Restart(ctx context.Context, dir string) error {
 		r.dir = dir
 	}
 	r.state = StateStarting
-	port, logf := r.reapPort, r.reapLogf
 	r.mu.Unlock()
 	// Between the stop and the spawn, reclaim marquee's own internal port from
 	// any escaped remnant of the old child so the new one can bind. Best-effort:
 	// if the port stays held, the new child simply fails to bind, which the
 	// switcher detects as a failed switch and reverts — marquee never self-kills.
-	if port > 0 {
-		if err := freeLoopbackPort(ctx, port, logf); err != nil && logf != nil {
-			logf("switch: internal port %d not freed before restart: %v", port, err)
-		}
+	if r.reclaim != nil {
+		_ = r.reclaim.Free(ctx)
 	}
 	return r.Start()
-}
-
-const (
-	portReleaseGrace = 1500 * time.Millisecond
-	portReleasePoll  = 50 * time.Millisecond
-)
-
-// freeLoopbackPort ensures 127.0.0.1:port has no listener before the new child
-// binds it. It first polls briefly for the just-stopped child to release the
-// port on its own; only if it is still held past the grace window does it reap
-// the listener(s) — an escaped remnant the process-group stop could not reach —
-// and confirm the port is free. The scope is deliberately narrow: only this one
-// loopback port, only the PIDs listening on it, only on the restart path.
-func freeLoopbackPort(ctx context.Context, port int, logf func(string, ...any)) error {
-	if port <= 0 {
-		return nil
-	}
-	if waitPortReleased(ctx, port) {
-		return nil
-	}
-	for _, pid := range loopbackListeners(ctx, port) {
-		reapListener(pid, port, logf)
-	}
-	if waitPortReleased(ctx, port) {
-		return nil
-	}
-	return fmt.Errorf("port %d still held after reaping its listeners", port)
-}
-
-func waitPortReleased(ctx context.Context, port int) bool {
-	deadline := time.Now().Add(portReleaseGrace)
-	for {
-		if !loopbackPortHeld(port) {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(portReleasePoll):
-		}
-	}
-}
-
-// loopbackPortHeld reports whether something is currently listening on
-// 127.0.0.1:port. It dials rather than binds, so it never grabs the port from
-// the child that is about to claim it.
-func loopbackPortHeld(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
-
-// reapListener terminates a single PID that holds marquee's internal port. pid
-// 0 and 1 are never signalled. An already-gone process (ESRCH) is a success.
-func reapListener(pid, port int, logf func(string, ...any)) {
-	if pid <= 1 {
-		return
-	}
-	err := syscall.Kill(pid, syscall.SIGKILL)
-	if err != nil && !errors.Is(err, syscall.ESRCH) {
-		if logf != nil {
-			logf("switch: could not reap PID %d holding internal port %d: %v", pid, port, err)
-		}
-		return
-	}
-	if logf != nil {
-		logf("switch: reaped PID %d holding marquee's internal port %d (escaped child remnant)", pid, port)
-	}
-}
-
-// loopbackListeners returns the PIDs listening on the given TCP port via lsof,
-// mirroring cmd/marquee's startup port diagnostic. lsof is optional and
-// deadline-bound: a missing or failing tool yields no PIDs and the caller falls
-// back to letting the new child fail to bind (a failed switch the switcher
-// reverts) rather than killing anything.
-func loopbackListeners(ctx context.Context, port int) []int {
-	// #nosec G204 -- port is marquee's OWN internal loopback port, an integer
-	// marquee itself chose and opened, never derived from HTTP input; lsof runs
-	// with a fixed argv. Every PID acted on comes straight from lsof's report of
-	// LISTEN sockets on that single port.
-	out, err := exec.CommandContext(ctx, "lsof", "-ti", fmt.Sprintf("tcp:%d", port), "-sTCP:LISTEN").Output()
-	if err != nil {
-		return nil
-	}
-	var pids []int
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if pid, err := strconv.Atoi(line); err == nil && pid > 1 {
-			pids = append(pids, pid)
-		}
-	}
-	return pids
 }
 
 // PGID reports the process-group id of the running child (the child
@@ -375,24 +262,4 @@ func (r *Runner) Status() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return Status{State: r.state, Err: r.exitErr}
-}
-
-// WaitTCP polls addr ("host:port") until it accepts a TCP connection or
-// ctx is done. A non-positive interval defaults to 50ms.
-func WaitTCP(ctx context.Context, addr string, interval time.Duration) error {
-	if interval <= 0 {
-		interval = 50 * time.Millisecond
-	}
-	dialer := net.Dialer{Timeout: interval}
-	for {
-		conn, err := dialer.DialContext(ctx, "tcp", addr)
-		if err == nil {
-			return conn.Close()
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(interval):
-		}
-	}
 }

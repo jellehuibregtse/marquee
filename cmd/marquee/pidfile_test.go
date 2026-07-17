@@ -38,7 +38,7 @@ func TestPidfilePathVariesByListenAddr(t *testing.T) {
 
 func TestPidfileWrittenOnSpawnRemovedOnStop(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "child.pid")
-	child := runner.New([]string{"sleep", "30"}, nil, "")
+	child := runner.New([]string{"sleep", "30"}, nil, "", nil)
 	if err := child.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

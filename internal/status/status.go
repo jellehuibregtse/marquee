@@ -8,6 +8,7 @@ import (
 	"github.com/jellehuibregtse/marquee/internal/bar"
 	"github.com/jellehuibregtse/marquee/internal/ghinfo"
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
+	"github.com/jellehuibregtse/marquee/internal/knob"
 	"github.com/jellehuibregtse/marquee/internal/proxy"
 )
 
@@ -52,6 +53,12 @@ type payload struct {
 	Size      string                  `json:"size"`
 	Theme     string                  `json:"theme"`
 	Pills     []string                `json:"pills"`
+	// Catalog is the knob catalog — the single owner of every knob's value set,
+	// labels, and theme palettes. It rides the status payload the bar already
+	// fetches (zero extra requests), so prefs.js/settings.js derive their value
+	// lists and labels from it and bar.js builds each theme's CSS from its
+	// palettes, all from the same table the CLI flags validated against.
+	Catalog knob.Catalog `json:"catalog"`
 }
 
 // Register wires GET /__marquee/status and a GET route per embedded bar module
@@ -96,6 +103,7 @@ func statusHandler(deps Deps) http.Handler {
 			Size:      deps.Size,
 			Theme:     deps.Theme,
 			Pills:     deps.Pills,
+			Catalog:   knob.Default,
 		}
 		if p.Worktrees == nil {
 			p.Worktrees = []gitinfo.Worktree{}

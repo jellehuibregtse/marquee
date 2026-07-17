@@ -1,59 +1,16 @@
 // settings.js is the ⚙ popover: it builds the panel DOM, wires the controls,
 // and talks back to bar.js only through callbacks. It owns no status or network
-// concerns — bar.js hands it the current effective prefs plus apply/reset
-// callbacks, so the panel stays a pure reflection of state driven by sync().
+// concerns — bar.js hands it the current effective prefs, the live knob catalog
+// (getCatalog), plus apply/reset callbacks, so the panel stays a pure reflection
+// of state driven by sync(). The catalog supplies every value list and label, so
+// the panel derives its choices from the status payload (via bar.js) rather than
+// hardcoding them — a knob added to the Go catalog surfaces here with no edit.
 //
 // Accessibility is acceptance criteria: the gear is a real button, the panel is
 // a keyboard-operable disclosure (Escape closes and returns focus to the gear,
 // outside-pointer closes), position is a real radiogroup of native radios (so
 // arrow-key selection works for free), focus is visible, and the entrance
 // animation is disabled under prefers-reduced-motion.
-
-import { POSITIONS, SIZES, THEMES, PILL_IDS } from "./prefs.js";
-
-const POSITION_LABELS = {
-  "bottom-left": "Bottom left",
-  "bottom-right": "Bottom right",
-  "top-left": "Top left",
-  "top-right": "Top right",
-};
-
-// Size is a toggle-button group rather than radios: three short, equal choices
-// read best as a compact S/M/L segmented control. Each button carries the full
-// word as its accessible name while showing only the initial, and aria-pressed
-// marks the active preset so the state is exposed without native radio roles.
-const SIZE_LABELS = {
-  small: "Small",
-  medium: "Medium",
-  large: "Large",
-};
-
-const SIZE_ABBR = {
-  small: "S",
-  medium: "M",
-  large: "L",
-};
-
-// Theme is a native <select>: the curated set is a small, mutually exclusive
-// list where the option text names each theme, and a real select gives keyboard
-// and screen-reader support for free plus a visible current value.
-const THEME_LABELS = {
-  default: "Default",
-  midnight: "Midnight",
-  sand: "Sand",
-  forest: "Forest",
-};
-
-// The Pills section is a per-id list: each row is a checkbox (shown/hidden) with
-// the pill's label plus ↑/↓ buttons to reorder. It reflects the effective order,
-// so hidden ids trail the visible ones; changing a checkbox or moving a row
-// applies live and persists through the same prefs plumbing as the other knobs.
-const PILL_LABELS = {
-  branch: "Branch",
-  dirty: "Uncommitted changes",
-  worktree: "Worktree",
-  pr: "Pull request",
-};
 
 // PANEL_CSS is concatenated into bar.js's single shadow-root <style>. The panel
 // reuses the corner-aware anchoring from the worktree menu so it flips its
@@ -282,15 +239,25 @@ export const PANEL_CSS = `
 }
 `;
 
+// choiceKey fingerprints an ordered {id, label} list so a section rebuilds only
+// when the catalog's ids or labels actually change — a background status poll
+// re-rendering the bar never tears down controls the user is interacting with.
+function choiceKey(choices) {
+  return choices.map((c) => c.id + "=" + c.label).join(";");
+}
+
 // createSettingsPanel wires the gear button and the (empty) panel container that
 // bar.js supplies in its template. It returns { sync, onOutsidePointer }:
-// bar.js calls sync() after each render so the checked radio reflects the
-// effective prefs, and forwards its document pointerdown to onOutsidePointer so
-// the panel closes on an outside click without bar.js knowing the panel's DOM.
-export function createSettingsPanel({ button, panel, host, getEffective, onPosition, onSize, onTheme, onPills, onReset }) {
+// bar.js calls sync() after each render so each control reflects the effective
+// prefs and the live catalog, and forwards its document pointerdown to
+// onOutsidePointer so the panel closes on an outside click without bar.js
+// knowing the panel's DOM.
+export function createSettingsPanel({ button, panel, host, getEffective, getCatalog, onPosition, onSize, onTheme, onPills, onReset }) {
   let open = false;
 
-  const radios = new Map();
+  // Position is a real radiogroup of native radios (arrow-key selection for
+  // free). The change listener lives on the group, so rebuilding the radios when
+  // the catalog changes keeps the wiring intact.
   const section = document.createElement("div");
   section.className = "settings-section";
   const label = document.createElement("span");
@@ -301,22 +268,34 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
   group.className = "settings-radios";
   group.setAttribute("role", "radiogroup");
   group.setAttribute("aria-labelledby", label.id);
-  for (const position of POSITIONS) {
-    const radioLabel = document.createElement("label");
-    radioLabel.className = "settings-radio";
-    const input = document.createElement("input");
-    input.type = "radio";
-    input.name = "marquee-position";
-    input.value = position;
-    const text = document.createElement("span");
-    text.textContent = POSITION_LABELS[position] || position;
-    radioLabel.append(input, text);
-    group.appendChild(radioLabel);
-    radios.set(position, input);
-  }
   section.append(label, group);
+  let radios = new Map();
+  let positionsKey = null;
+  function syncPositions(choices) {
+    const key = choiceKey(choices);
+    if (key === positionsKey) return;
+    positionsKey = key;
+    radios = new Map();
+    group.replaceChildren();
+    for (const { id, label: text } of choices) {
+      const radioLabel = document.createElement("label");
+      radioLabel.className = "settings-radio";
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "marquee-position";
+      input.value = id;
+      const span = document.createElement("span");
+      span.textContent = text;
+      radioLabel.append(input, span);
+      group.appendChild(radioLabel);
+      radios.set(id, input);
+    }
+  }
 
-  const sizeButtons = new Map();
+  // Size is a toggle-button group rather than radios: a few short, equal choices
+  // read best as a compact segmented control. Each button carries the full label
+  // as its accessible name while showing only its initial, and aria-pressed
+  // marks the active preset so the state is exposed without native radio roles.
   const sizeSection = document.createElement("div");
   sizeSection.className = "settings-section";
   const sizeLabel = document.createElement("span");
@@ -327,20 +306,34 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
   sizeGroup.className = "settings-sizes";
   sizeGroup.setAttribute("role", "group");
   sizeGroup.setAttribute("aria-labelledby", sizeLabel.id);
-  for (const size of SIZES) {
-    const sizeButton = document.createElement("button");
-    sizeButton.type = "button";
-    sizeButton.className = "settings-size";
-    sizeButton.dataset.size = size;
-    sizeButton.textContent = SIZE_ABBR[size] || size;
-    sizeButton.setAttribute("aria-label", SIZE_LABELS[size] || size);
-    sizeButton.setAttribute("aria-pressed", "false");
-    sizeButton.addEventListener("click", () => onSize(size));
-    sizeGroup.appendChild(sizeButton);
-    sizeButtons.set(size, sizeButton);
-  }
   sizeSection.append(sizeLabel, sizeGroup);
+  let sizeButtons = new Map();
+  let sizesKey = null;
+  function syncSizes(choices) {
+    const key = choiceKey(choices);
+    if (key === sizesKey) return;
+    sizesKey = key;
+    sizeButtons = new Map();
+    sizeGroup.replaceChildren();
+    for (const { id, label: text } of choices) {
+      const sizeButton = document.createElement("button");
+      sizeButton.type = "button";
+      sizeButton.className = "settings-size";
+      sizeButton.dataset.size = id;
+      sizeButton.textContent = text ? text[0].toUpperCase() : id;
+      sizeButton.setAttribute("aria-label", text || id);
+      sizeButton.setAttribute("aria-pressed", "false");
+      sizeButton.addEventListener("click", () => onSize(id));
+      sizeGroup.appendChild(sizeButton);
+      sizeButtons.set(id, sizeButton);
+    }
+  }
 
+  // Theme is a native <select>: a small, mutually exclusive list where the
+  // option text names each theme, and a real select gives keyboard and
+  // screen-reader support for free plus a visible current value. The change
+  // listener lives on the select, so only its <option>s rebuild on a catalog
+  // change.
   const themeSection = document.createElement("div");
   themeSection.className = "settings-section";
   const themeLabel = document.createElement("label");
@@ -350,15 +343,27 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
   themeSelect.className = "settings-theme";
   themeSelect.id = "marquee-settings-theme";
   themeLabel.htmlFor = themeSelect.id;
-  for (const theme of THEMES) {
-    const option = document.createElement("option");
-    option.value = theme;
-    option.textContent = THEME_LABELS[theme] || theme;
-    themeSelect.appendChild(option);
-  }
   themeSelect.addEventListener("change", () => onTheme(themeSelect.value));
   themeSection.append(themeLabel, themeSelect);
+  let themesKey = null;
+  function syncThemes(choices) {
+    const key = choiceKey(choices);
+    if (key === themesKey) return;
+    themesKey = key;
+    themeSelect.replaceChildren();
+    for (const { id, label: text } of choices) {
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = text;
+      themeSelect.appendChild(option);
+    }
+  }
 
+  // The Pills section is a per-id list: each row is a checkbox (shown/hidden)
+  // with the pill's label plus ↑/↓ buttons to reorder. It reflects the effective
+  // order, so hidden ids trail the visible ones; changing a checkbox or moving a
+  // row applies live and persists through the same prefs plumbing as the other
+  // knobs.
   const pillsSection = document.createElement("div");
   pillsSection.className = "settings-section";
   const pillsLabel = document.createElement("span");
@@ -383,14 +388,17 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
     onPills(order.filter((id) => visibleSet.has(id)));
   }
 
-  // syncPills rebuilds the rows only when the effective order or visibility
-  // actually changed, so a background status poll re-rendering the bar never
-  // tears down rows the user is interacting with (which would drop focus).
-  function syncPills() {
+  // syncPills rebuilds the rows only when the effective order, visibility, or
+  // catalog labels actually changed, so a background status poll re-rendering the
+  // bar never tears down rows the user is interacting with (which would drop
+  // focus).
+  function syncPills(choices) {
+    const labelOf = new Map(choices.map((c) => [c.id, c.label]));
+    const allIds = choices.map((c) => c.id);
     const visible = getEffective().pills;
     const visibleSet = new Set(visible);
-    const order = [...visible, ...PILL_IDS.filter((id) => !visibleSet.has(id))];
-    const key = order.map((id) => (visibleSet.has(id) ? "+" : "-") + id).join(",");
+    const order = [...visible, ...allIds.filter((id) => !visibleSet.has(id))];
+    const key = choiceKey(choices) + "|" + order.map((id) => (visibleSet.has(id) ? "+" : "-") + id).join(",");
     if (key === lastPillsKey) {
       pendingFocus = null;
       return;
@@ -415,14 +423,14 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
         emitPills(order, next);
       });
       const text = document.createElement("span");
-      text.textContent = PILL_LABELS[id] || id;
+      text.textContent = labelOf.get(id) || id;
       rowLabel.append(checkbox, text);
 
       const up = document.createElement("button");
       up.type = "button";
       up.className = "settings-pill-move";
       up.textContent = "↑︎";
-      up.setAttribute("aria-label", `Move ${PILL_LABELS[id] || id} up`);
+      up.setAttribute("aria-label", `Move ${labelOf.get(id) || id} up`);
       up.disabled = index === 0;
       up.addEventListener("click", () => {
         const next = [...order];
@@ -435,7 +443,7 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
       down.type = "button";
       down.className = "settings-pill-move";
       down.textContent = "↓︎";
-      down.setAttribute("aria-label", `Move ${PILL_LABELS[id] || id} down`);
+      down.setAttribute("aria-label", `Move ${labelOf.get(id) || id} down`);
       down.disabled = index === order.length - 1;
       down.addEventListener("click", () => {
         const next = [...order];
@@ -473,6 +481,10 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
 
   function sync() {
     const effective = getEffective();
+    const catalog = getCatalog();
+    syncPositions(catalog.positions);
+    syncSizes(catalog.sizes);
+    syncThemes(catalog.themes);
     for (const [position, input] of radios) {
       input.checked = position === effective.position;
     }
@@ -480,7 +492,7 @@ export function createSettingsPanel({ button, panel, host, getEffective, onPosit
       sizeButton.setAttribute("aria-pressed", String(size === effective.size));
     }
     themeSelect.value = effective.theme;
-    syncPills();
+    syncPills(catalog.pills);
   }
 
   function focusSelected() {

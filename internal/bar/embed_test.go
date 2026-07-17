@@ -41,12 +41,16 @@ func TestBarScriptEmbedded(t *testing.T) {
 		`:host([data-size="small"])`,
 		`:host([data-size="large"])`,
 		"calc(28px * var(--mq-scale, 1))",
-		// Curated themes (PR 5): the chrome palette lives in custom properties so
-		// a theme is a value set, the effective theme rides a data-theme
-		// attribute (fail-open to default), and each curated theme is a
-		// scheme-independent :host attribute rule. The branch chip is untouched —
+		// Themes via the knob catalog (knob-catalog refactor): the chrome palette
+		// lives in custom properties, the effective theme rides a data-theme
+		// attribute (fail-open to default), and each theme's palette comes from the
+		// catalog in the status payload — #applyThemeStyles builds a per-theme
+		// :host([data-theme=…]) rule from that data into a dedicated <style>, so a
+		// theme is a value set, not a hardcoded CSS block. The static :host palette
+		// remains only as the pre-payload fallback. The branch chip is untouched —
 		// no theme selector sets its color, preserving its hash-contrast guarantee.
 		"status.theme",
+		"status.catalog",
 		"data-theme",
 		"--mq-bg",
 		"--mq-fg",
@@ -54,9 +58,19 @@ func TestBarScriptEmbedded(t *testing.T) {
 		"--mq-chip-bg",
 		`background: var(--mq-bg)`,
 		`background: var(--mq-chip-bg)`,
-		`:host([data-theme="midnight"])`,
-		`:host([data-theme="sand"])`,
-		`:host([data-theme="forest"])`,
+		"mq-themes",
+		"#applyThemeStyles",
+		"themeRule",
+		"paletteDecls",
+		// Palette guard: every palette field is validated before any rule is
+		// emitted, so a malformed payload can neither inject "undefined" custom
+		// property values over the static fallback nor break out of the generated
+		// <style> — a bad palette yields no rule and the fallback wins (fail-open).
+		"cssValue",
+		"validPalette",
+		`:host([data-theme="`,
+		"effectiveCatalog",
+		"makeValidators",
 		"safeHttpUrl",
 		`url.protocol === "https:"`,
 		// Worktree switcher (M4-T2): the POST target, the token header echoed
@@ -199,6 +213,14 @@ func TestPrefsModuleEmbedded(t *testing.T) {
 		"export const PILL_IDS",
 		`pills: ["branch", "dirty", "worktree", "pr"]`,
 		"Array.isArray",
+		// Knob catalog (knob-catalog refactor): the built-in fallback catalog with
+		// ids and labels, plus the payload-driven derivation — effectiveCatalog
+		// reads the status catalog (fallback per knob) and makeValidators builds
+		// the validators from it, so value lists flow from the payload while the
+		// built-ins remain only as the fail-open fallback.
+		"export const FALLBACK_CATALOG",
+		"export function effectiveCatalog",
+		"export function makeValidators",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("prefs.js missing expected marker %q", marker)
@@ -235,7 +257,11 @@ func TestSettingsModuleEmbedded(t *testing.T) {
 	for _, marker := range []string{
 		"export const PANEL_CSS",
 		"export function createSettingsPanel",
-		`from "./prefs.js"`,
+		// Knob catalog (knob-catalog refactor): the panel derives every value list
+		// and label from the live catalog bar.js hands it via getCatalog, sourced
+		// from the status payload, so settings.js no longer hardcodes the value
+		// sets or imports them from prefs.js.
+		"getCatalog",
 		"radiogroup",
 		`type = "radio"`,
 		"marquee-position",

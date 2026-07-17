@@ -1,4 +1,4 @@
-import { DEFAULTS, PILL_IDS, merge, validate, load, save, reset } from "./prefs.js";
+import { DEFAULTS, PILL_IDS, effectiveCatalog, makeValidators, merge, validate, load, save, reset } from "./prefs.js";
 import { PANEL_CSS, createSettingsPanel } from "./settings.js";
 
 const STORAGE_KEY = "marquee-bar-collapsed";
@@ -22,11 +22,15 @@ const CSS = `
   --mq-scale: 1;
   /* --mq-bg/-fg/-border/-chip-bg are the bar's chrome palette; every themable
      surface (bar, menu, toggle, switch, settings panel) reads them, so a theme
-     is just a new value set. The base :host values are the default theme's
-     light look; the dark-scheme override below completes the default. Curated
-     themes set all four with higher specificity, so they win over the scheme
-     media query and stay scheme-independent. The branch chip is deliberately
-     excluded — it keeps its hash color and its own contrast guarantee. */
+     is just a new value set. These base :host values are the default theme's
+     light look and the dark-scheme override below completes it — together they
+     are the fail-open fallback that renders before the first status fetch (or if
+     the payload carries no catalog). The curated themes' palettes come from the
+     knob catalog in the status payload; #applyThemeStyles emits a per-theme
+     :host([data-theme=…]) rule from that data into a separate <style>, so those
+     rules win over this fallback with higher specificity and, being un-mediated,
+     stay scheme-independent. The branch chip is deliberately excluded — it keeps
+     its hash color and its own contrast guarantee. */
   --mq-bg: #f5f5f4;
   --mq-fg: #1c1c1c;
   --mq-border: #d0d0ce;
@@ -41,24 +45,6 @@ const CSS = `
     --mq-border: #4d4d4d;
     --mq-chip-bg: rgba(255, 255, 255, 0.12);
   }
-}
-:host([data-theme="midnight"]) {
-  --mq-bg: #0f172a;
-  --mq-fg: #e2e8f0;
-  --mq-border: #334155;
-  --mq-chip-bg: #1e293b;
-}
-:host([data-theme="sand"]) {
-  --mq-bg: #f4ecd8;
-  --mq-fg: #3a2e1a;
-  --mq-border: #d9cdb3;
-  --mq-chip-bg: #e6d9ba;
-}
-:host([data-theme="forest"]) {
-  --mq-bg: #0f1f17;
-  --mq-fg: #d6e8dc;
-  --mq-border: #2d4a3a;
-  --mq-chip-bg: #1a3226;
 }
 :host([data-size="small"]) {
   --mq-scale: 0.85;
@@ -476,6 +462,7 @@ a:focus-visible {
 
 const TEMPLATE = `
 <style>${CSS}${PANEL_CSS}</style>
+<style class="mq-themes"></style>
 <div class="wrap" hidden>
   <div class="bar" role="status" aria-label="Development branch information">
     <span class="chip branch"></span>
@@ -504,6 +491,46 @@ const TEMPLATE = `
   </div>
 </div>
 `;
+
+// cssValue gates one palette entry before it reaches the generated <style>: it
+// must be a non-empty string free of braces, semicolons, and control
+// characters, so a malformed palette can neither emit "undefined" as a custom
+// property value nor break out of its declaration block. The values normally
+// come verbatim from marquee's own embedded knob catalog, but a stale or
+// malformed payload must degrade to the static fallback, never to broken CSS.
+function cssValue(value) {
+  return typeof value === "string" && value.trim() !== "" && !/[{};\u0000-\u001f]/.test(value);
+}
+
+// validPalette accepts a palette only when all four themable custom properties
+// carry a usable CSS value; a palette missing any field yields no rule, so the
+// static default fallback wins for that theme (fail-open).
+function validPalette(palette) {
+  return Boolean(palette) && [palette.bg, palette.fg, palette.border, palette.chipBg].every(cssValue);
+}
+
+// paletteDecls renders an already-validated catalog palette as the four
+// themable custom-property declarations.
+function paletteDecls(palette) {
+  return `--mq-bg: ${palette.bg}; --mq-fg: ${palette.fg}; --mq-border: ${palette.border}; --mq-chip-bg: ${palette.chipBg};`;
+}
+
+// themeRule builds one theme's CSS from its catalog entry: a base
+// :host([data-theme=id]) rule from the light palette, plus a dark-scheme media
+// override only when the theme carries a valid dark palette (the default theme
+// is scheme-aware; curated themes are fixed). The id must be a plain word so it
+// cannot escape the attribute selector, and both palettes pass validPalette
+// before any rule is emitted — a malformed entry yields an empty string so the
+// static default fallback still covers the bar (fail-open).
+function themeRule(theme) {
+  if (!theme || typeof theme.id !== "string" || !/^[\w-]+$/.test(theme.id) || !validPalette(theme.light)) return "";
+  const selector = `:host([data-theme="${theme.id}"])`;
+  let rule = `${selector} { ${paletteDecls(theme.light)} }`;
+  if (validPalette(theme.dark)) {
+    rule += `\n@media (prefers-color-scheme: dark) { ${selector} { ${paletteDecls(theme.dark)} } }`;
+  }
+  return rule;
+}
 
 function fnv1a(text) {
   let hash = 0x811c9dc5;
@@ -593,6 +620,8 @@ class MarqueeBar extends HTMLElement {
   #overlaySpinner;
   #overlayCheck;
   #overlayText;
+  #themeStyle;
+  #themeKey = "";
   #settings;
   #storedPrefs = {};
   #status = null;
@@ -630,12 +659,14 @@ class MarqueeBar extends HTMLElement {
     this.#overlaySpinner = this.shadowRoot.querySelector(".overlay-spinner");
     this.#overlayCheck = this.shadowRoot.querySelector(".overlay-check");
     this.#overlayText = this.shadowRoot.querySelector(".overlay-text");
+    this.#themeStyle = this.shadowRoot.querySelector(".mq-themes");
     this.#storedPrefs = load(localStore());
     this.#settings = createSettingsPanel({
       button: this.#gear,
       panel: this.#settingsMenu,
       host: this,
       getEffective: () => this.#effective(),
+      getCatalog: () => effectiveCatalog(this.#status || {}),
       onPosition: (position) => this.#applyPref({ position }),
       onSize: (size) => this.#applyPref({ size }),
       onTheme: (theme) => this.#applyPref({ theme }),
@@ -695,6 +726,10 @@ class MarqueeBar extends HTMLElement {
       return;
     }
     this.#wrap.hidden = false;
+    // The theme palettes ride the status payload; build the per-theme CSS from
+    // them before applying data-theme so the effective theme's custom properties
+    // are in place the moment the attribute selects them.
+    this.#applyThemeStyles();
     // Stored panel prefs overlay the CLI/status defaults; a missing or invalid
     // value at either layer falls back, so the bar is never left unanchored or
     // unscaled.
@@ -729,24 +764,46 @@ class MarqueeBar extends HTMLElement {
     this.#toggle.style.background = this.#collapsed ? colors.background : "";
   }
 
-  // #effective layers the stored panel prefs over the CLI/status defaults. The
-  // status default is itself validated against the fallback DEFAULTS, so both
-  // layers fail open: a bad value anywhere yields a valid effective pref.
+  // #applyThemeStyles builds each theme's CSS custom-property set from the knob
+  // catalog in the status payload and writes it into the dedicated <style>. It
+  // rebuilds only when the theme data changes, and a missing or malformed
+  // catalog leaves the static default fallback untouched — fail-open, so the bar
+  // never loses its palette.
+  #applyThemeStyles() {
+    const themes = this.#status && this.#status.catalog ? this.#status.catalog.themes : null;
+    const choices = themes && Array.isArray(themes.choices) ? themes.choices : null;
+    if (!choices) return;
+    const key = JSON.stringify(choices);
+    if (key === this.#themeKey) return;
+    this.#themeKey = key;
+    this.#themeStyle.textContent = choices.map(themeRule).join("\n");
+  }
+
+  // #effective layers the stored panel prefs over the CLI/status defaults,
+  // validating both against the value lists derived from the payload catalog (or
+  // the built-in fallback when the payload has none). Every layer fails open: a
+  // bad value anywhere yields a valid effective pref.
   #effective() {
     const status = this.#status || {};
-    const defaults = merge(DEFAULTS, {
-      position: status.position,
-      size: status.size,
-      theme: status.theme,
-      pills: status.pills,
-    });
-    return merge(defaults, this.#storedPrefs);
+    const validators = makeValidators(effectiveCatalog(status));
+    const defaults = merge(
+      DEFAULTS,
+      {
+        position: status.position,
+        size: status.size,
+        theme: status.theme,
+        pills: status.pills,
+      },
+      validators,
+    );
+    return merge(defaults, this.#storedPrefs, validators);
   }
 
   // #applyPref sanitizes and persists a panel change, then re-renders so the
   // overlay takes effect immediately and survives reload.
   #applyPref(patch) {
-    this.#storedPrefs = validate({ ...this.#storedPrefs, ...patch }, DEFAULTS);
+    const validators = makeValidators(effectiveCatalog(this.#status || {}));
+    this.#storedPrefs = validate({ ...this.#storedPrefs, ...patch }, DEFAULTS, validators);
     save(localStore(), this.#storedPrefs);
     this.#render();
   }

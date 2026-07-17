@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jellehuibregtse/marquee/internal/switching"
 )
 
 const internalPrefix = "/__marquee/"
@@ -69,13 +71,26 @@ type Handler struct {
 	probe    *probe
 	logger   *log.Logger
 
-	// switching holds a func() string reporting the slug of an in-progress
-	// worktree switch (empty when idle), so proxied navigations can be shown
-	// a "switching…" page instead of racing a restarting child. Stored via
-	// SetSwitchingProbe as an atomic.Value to stay race-free without coupling
-	// the proxy to the switcher package (which imports this one).
-	switching atomic.Value
+	// switchSrc holds the in-flight switch's Progress source, so proxied
+	// navigations can be shown a "switching…" page instead of racing a
+	// restarting child. It is a narrow typed seam over the leaf switching
+	// package, not the switcher itself: the orchestrator implements SwitchSource
+	// and main wires it via SetSwitchSource, so the proxy learns of switches
+	// without importing (and cycling with) the switcher. Stored in an
+	// atomic.Value so reads stay race-free.
+	switchSrc atomic.Value
 }
+
+// SwitchSource reports the progress of an in-flight worktree switch. The switch
+// orchestrator implements it; the proxy consults only Progress().Slug to decide
+// whether a navigation should see the interstitial.
+type SwitchSource interface {
+	Progress() switching.Progress
+}
+
+// switchSourceHolder gives atomic.Value a single concrete type to store even
+// though SwitchSource is an interface.
+type switchSourceHolder struct{ src SwitchSource }
 
 // New builds a Handler for the given configuration.
 func New(cfg Config) *Handler {
@@ -136,21 +151,21 @@ func (h *Handler) Internal() *InternalMux {
 	return h.internal
 }
 
-// SetSwitchingProbe installs a callback reporting the slug of an in-progress
-// worktree switch (empty string when none). While it reports a slug, proxied
-// (non-internal) navigations receive a self-refreshing "switching…" page
-// rather than being forwarded to a child that is mid-restart. The switcher
-// wires this after construction; before it does, the proxy behaves as before.
-func (h *Handler) SetSwitchingProbe(fn func() string) {
-	h.switching.Store(fn)
+// SetSwitchSource installs the source reporting an in-progress worktree
+// switch's progress. While it reports a non-empty slug, proxied (non-internal)
+// navigations receive a self-refreshing "switching…" page rather than being
+// forwarded to a child that is mid-restart. main wires this after construction;
+// before it does, the proxy behaves as before.
+func (h *Handler) SetSwitchSource(src SwitchSource) {
+	h.switchSrc.Store(switchSourceHolder{src: src})
 }
 
 func (h *Handler) switchingSlug() string {
-	fn, _ := h.switching.Load().(func() string)
-	if fn == nil {
+	holder, _ := h.switchSrc.Load().(switchSourceHolder)
+	if holder.src == nil {
 		return ""
 	}
-	return fn()
+	return holder.src.Progress().Slug
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

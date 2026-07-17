@@ -26,6 +26,7 @@ import (
 
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
 	"github.com/jellehuibregtse/marquee/internal/proxy"
+	"github.com/jellehuibregtse/marquee/internal/switching"
 )
 
 // Runner is the subset of the process runner the switcher needs: restart the
@@ -147,11 +148,16 @@ func Register(mux *proxy.InternalMux, h *Handler) {
 	mux.Handle("POST /__marquee/switch", http.HandlerFunc(h.serve))
 }
 
-// SwitchingSlug reports the slug of an in-progress switch (empty when idle),
-// for proxy.Handler.SetSwitchingProbe.
-func (h *Handler) SwitchingSlug() string {
+// Progress reports the in-progress switch's phase and slug (empty when idle),
+// satisfying proxy.SwitchSource so the interstitial can be served without the
+// proxy importing this package.
+func (h *Handler) Progress() switching.Progress {
 	s, _ := h.slug.Load().(string)
-	return s
+	phase := switching.Idle
+	if s != "" {
+		phase = switching.Booting
+	}
+	return switching.Progress{Phase: phase, Slug: s}
 }
 
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {

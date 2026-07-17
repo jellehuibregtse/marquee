@@ -77,6 +77,14 @@ func TestBarScriptEmbedded(t *testing.T) {
 		"#showOverlay",
 		"#hideOverlay",
 		"#waitForWorktreeReady",
+		// Overlay polish: the scrim sits below the bar's own stacking level so the
+		// bar stays visible and legible above the dimmed page during a switch, and
+		// the ready→reload beat swaps the spinner for a settled check instead of
+		// leaving a spinner frozen mid-navigation.
+		"overlay-check",
+		"#markOverlayReady",
+		"z-index: 2",
+		"z-index: 1",
 		"SWITCH_POLL_INTERVAL_MS",
 		`status.child.state === "running"`,
 		"status.worktree.slug === slug",

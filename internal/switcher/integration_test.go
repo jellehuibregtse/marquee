@@ -179,15 +179,25 @@ func runTestChild() {
 	}
 }
 
-// intHarness wires the real runner and switcher against a real git repo.
+// intHarness wires the real runner, the orchestrator, and the switch handler
+// against a real git repo, so the tests exercise the actual process lifecycle
+// the shutdown path in cmd/marquee reacts to.
 type intHarness struct {
 	mux    http.Handler
 	child  *runner.Runner
+	orch   *switcher.Orchestrator
 	port   string
 	cwdLog string
 	main   string
 	target string
 }
+
+// realWorktrees is the production Worktrees wiring for the integration tests:
+// git's own Collect, and a no-op Repoint (the pollers are not run here).
+type realWorktrees struct{}
+
+func (realWorktrees) Collect(dir string) (gitinfo.Snapshot, error) { return gitinfo.Collect(dir) }
+func (realWorktrees) Repoint(string)                               {}
 
 func freeTestPort(t *testing.T) string {
 	t.Helper()
@@ -250,22 +260,21 @@ func newIntHarnessHook(t *testing.T, switchHook string) *intHarness {
 		t.Fatalf("initial child never became healthy: %v", err)
 	}
 
-	sw := switcher.New(switcher.Config{
-		Token:         testToken,
-		Runner:        child,
-		Collect:       gitinfo.Collect,
+	orch := switcher.NewOrchestrator(switcher.OrchestratorConfig{
+		Child:         child,
+		Worktrees:     realWorktrees{},
 		Health:        func(ctx context.Context) error { return portpkg.WaitTCP(ctx, addr, 20*time.Millisecond) },
-		ChildAlive:    func() bool { return child.Status().State == runner.StateRunning },
 		Dir:           main,
 		Logger:        log.New(io.Discard, "", 0),
 		HealthTimeout: 1500 * time.Millisecond,
 		SwitchHook:    switchHook,
 		HookTimeout:   10 * time.Second,
 	})
+	sw := switcher.New(switcher.Config{Token: testToken, Orchestrator: orch, Logger: log.New(io.Discard, "", 0)})
 	mux := proxy.NewInternalMux()
 	switcher.Register(mux, sw)
 
-	return &intHarness{mux: mux, child: child, port: port, cwdLog: cwdLog, main: main, target: target}
+	return &intHarness{mux: mux, child: child, orch: orch, port: port, cwdLog: cwdLog, main: main, target: target}
 }
 
 func (h *intHarness) switchTo(slug string, confirm bool) *httptest.ResponseRecorder {
@@ -279,12 +288,13 @@ func (h *intHarness) switchTo(slug string, confirm bool) *httptest.ResponseRecor
 	return rec
 }
 
-// assertShutdownNotTriggered fails if the runner's terminal-exit signal — the
-// exact channel cmd/marquee selects on to shut marquee down — has fired.
+// assertShutdownNotTriggered fails if the orchestrator's outward terminal-exit
+// signal — the exact channel cmd/marquee selects on to shut marquee down — has
+// fired.
 func (h *intHarness) assertShutdownNotTriggered(t *testing.T) {
 	t.Helper()
 	select {
-	case <-h.child.Terminated():
+	case <-h.orch.Terminated():
 		t.Fatal("shutdown path triggered: Terminated fired during/after a switch")
 	case <-time.After(300 * time.Millisecond):
 	}
@@ -435,53 +445,6 @@ func TestIntegrationBothFailStaysAlive(t *testing.T) {
 	h.assertChildDown(t)
 }
 
-// A failing hook must leave the running child completely untouched: the hook
-// runs before the old child is ever stopped, so a failure there restarts
-// nothing — not the target, and not a needless bounce of the healthy previous
-// worktree. Uses the fakeRunner so the exact (empty) restart sequence is
-// observable, and the managed window still balances.
-func TestSwitchHookFailureLeavesChildUntouched(t *testing.T) {
-	runner := &fakeRunner{}
-	repoint := &repointTracker{}
-	h := newHarness(t, switcher.Config{
-		Runner:     runner,
-		Repoint:    repoint.repoint,
-		Dir:        "/repo/main",
-		SwitchHook: "exit 1",
-	})
-	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", rec.Code)
-	}
-	if code := errorCode(t, rec); code != "switch_failed" {
-		t.Errorf("error = %q, want %q", code, "switch_failed")
-	}
-	var body struct {
-		OK       bool `json:"ok"`
-		Reverted bool `json:"reverted"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body.OK {
-		t.Error("a failed hook reported ok:true")
-	}
-	if !body.Reverted {
-		t.Error("reverted = false, but the child was left on the previous, working worktree")
-	}
-	// The hook fails before the child is ever stopped: no restart at all — not
-	// the target, and not a pointless bounce of the still-healthy child.
-	if n := runner.count(); n != 0 {
-		t.Errorf("runner restarted %d times, want 0 (hook failed before any process action)", n)
-	}
-	if n := len(repoint.calls()); n != 0 {
-		t.Errorf("repoint called %d times, want 0", n)
-	}
-	if runner.managedDepth() != 0 {
-		t.Errorf("managed depth = %d after serve, want 0 (window must be balanced)", runner.managedDepth())
-	}
-}
-
 // Contract 4: the switch hook runs in the TARGET worktree (its cwd is git's
 // worktree path) before the child restarts there. A hook that writes a relative
 // marker file proves both: the marker lands in the target worktree, and the
@@ -625,13 +588,14 @@ func TestIntegrationRevertHookClearsStaleBlocker(t *testing.T) {
 	}
 }
 
-// newDaemonHarness wires the real runner + switcher over a child that
+// newDaemonHarness wires the real runner + orchestrator over a child that
 // daemonizes (MARQUEE_TEST_CHILD=daemon): its listener runs in a separate
 // session and survives the process-group stop, exactly like a tmux/overmind
 // server. The switch is wired as in production — a port.Reclaimer passed to the
-// runner frees the internal port before the new child spawns, and ChildAlive
-// requires a live child. Cleanup reaps every escaped listener the run spawned,
-// so no detached port leaks across the suite.
+// runner frees the internal port before the new child spawns, and the
+// orchestrator's liveness gate (child.Alive) requires a live child. Cleanup
+// reaps every escaped listener the run spawned, so no detached port leaks
+// across the suite.
 func newDaemonHarness(t *testing.T) *intHarness {
 	t.Helper()
 	main := evalDir(t)
@@ -678,20 +642,19 @@ func newDaemonHarness(t *testing.T) *intHarness {
 		t.Fatalf("initial child never became healthy: %v", err)
 	}
 
-	sw := switcher.New(switcher.Config{
-		Token:         testToken,
-		Runner:        child,
-		Collect:       gitinfo.Collect,
+	orch := switcher.NewOrchestrator(switcher.OrchestratorConfig{
+		Child:         child,
+		Worktrees:     realWorktrees{},
 		Health:        func(ctx context.Context) error { return portpkg.WaitTCP(ctx, addr, 20*time.Millisecond) },
-		ChildAlive:    func() bool { return child.Status().State == runner.StateRunning },
 		Dir:           main,
 		Logger:        log.New(io.Discard, "", 0),
 		HealthTimeout: 700 * time.Millisecond,
 	})
+	sw := switcher.New(switcher.Config{Token: testToken, Orchestrator: orch, Logger: log.New(io.Discard, "", 0)})
 	mux := proxy.NewInternalMux()
 	switcher.Register(mux, sw)
 
-	return &intHarness{mux: mux, child: child, port: port, cwdLog: cwdLog, main: main, target: target}
+	return &intHarness{mux: mux, child: child, orch: orch, port: port, cwdLog: cwdLog, main: main, target: target}
 }
 
 // reapDetached kills every escaped listener PID the daemon child recorded, so a

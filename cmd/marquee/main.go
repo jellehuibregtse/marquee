@@ -33,6 +33,16 @@ var (
 
 const stopTimeout = 10 * time.Second
 
+// worktrees adapts the git collector and the poller repoints to the
+// orchestrator's Worktrees port: Collect reads git's own worktree set, Repoint
+// points the git and gh pollers at the worktree a switch restarted into.
+type worktrees struct {
+	repoint func(dir string)
+}
+
+func (w worktrees) Collect(dir string) (gitinfo.Snapshot, error) { return gitinfo.Collect(dir) }
+func (w worktrees) Repoint(dir string)                           { w.repoint(dir) }
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "attach" {
 		os.Exit(runAttach(os.Args[2:]))
@@ -143,20 +153,25 @@ func run() int {
 		Theme:      opts.theme,
 		Pills:      opts.pills,
 	})
+
+	// The orchestrator owns the switch and the child's termination knowledge: it
+	// is always built in wrapper mode, so main has one outward channel
+	// (orch.Terminated) whose meaning is "the child really died and nobody is
+	// handling it." The HTTP switch endpoint and the proxy's interstitial are
+	// wired only when a token was minted; without one, no switch ever runs and
+	// the orchestrator simply forwards a dying child outward as before.
+	healthAddr := fmt.Sprintf("127.0.0.1:%d", internalPort)
+	orch := switcher.NewOrchestrator(switcher.OrchestratorConfig{
+		Child:      child,
+		Worktrees:  worktrees{repoint: func(dir string) { git.Repoint(dir); gh.Repoint(dir) }},
+		Health:     func(ctx context.Context) error { return port.WaitTCP(ctx, healthAddr, 0) },
+		Dir:        workdir,
+		SwitchHook: opts.switchHook,
+	})
 	if switchToken != "" {
-		healthAddr := fmt.Sprintf("127.0.0.1:%d", internalPort)
-		sw := switcher.New(switcher.Config{
-			Token:      switchToken,
-			Runner:     child,
-			Collect:    gitinfo.Collect,
-			Repoint:    func(dir string) { git.Repoint(dir); gh.Repoint(dir) },
-			Health:     func(ctx context.Context) error { return port.WaitTCP(ctx, healthAddr, 0) },
-			ChildAlive: func() bool { return child.Status().State == runner.StateRunning },
-			Dir:        workdir,
-			SwitchHook: opts.switchHook,
-		})
+		sw := switcher.New(switcher.Config{Token: switchToken, Orchestrator: orch})
 		switcher.Register(handler.Internal(), sw)
-		handler.SetSwitchSource(sw)
+		handler.SetSwitchSource(orch)
 	}
 
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
@@ -177,7 +192,7 @@ func run() int {
 	case sig := <-sigCh:
 		log.Info("received %s, stopping child", sig)
 		return stopChild(child, sig, log)
-	case <-child.Terminated():
+	case <-orch.Terminated():
 		st := child.Status()
 		code := exitCode(st.Err)
 		log.Info("child exited (%s), shutting down", exitReason(st.Err))

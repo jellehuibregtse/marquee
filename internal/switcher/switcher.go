@@ -1,143 +1,70 @@
-// Package switcher implements POST /__marquee/switch: the endpoint that
-// restarts the wrapped dev server in a different git worktree. It is the
-// highest-risk surface in marquee — it kills and spawns processes and selects
-// a working directory — so every request passes a full guard stack before any
-// process action, and the target directory is only ever git's own worktree
-// path, never anything derived from the request. See docs/security.md
-// (Threats 3 and 4).
+// Package switcher serves POST /__marquee/switch: the endpoint that restarts
+// the wrapped dev server in a different git worktree. The HTTP handler is a thin
+// adapter — parse, same-origin and token authz, the busy and dirty-confirm
+// guard rails — over the switch orchestrator, which owns the switch itself (the
+// restart, the readiness gate, the revert, the slug lifetime, and the phase).
+// This is the highest-risk surface in marquee — it kills and spawns processes
+// and selects a working directory — so every request passes the full guard
+// stack before any process action, and the target directory is only ever git's
+// own worktree path, never anything derived from the request. See
+// docs/security.md (Threats 3 and 4).
 package switcher
 
 import (
-	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"syscall"
-	"time"
 
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
 	"github.com/jellehuibregtse/marquee/internal/proxy"
-	"github.com/jellehuibregtse/marquee/internal/switching"
 )
 
-// Runner is the subset of the process runner the switcher needs: restart the
-// child in a new working directory, and open a managed lifecycle window for the
-// duration of a switch. BeginManaged/EndManaged make the child's transient
-// exits during a switch (the target restart, a failed boot, the revert) belong
-// to the switcher, not to main's shutdown path. Kept as an interface so tests
-// can assert exactly what process action a request did (or did not) trigger.
-type Runner interface {
-	Restart(ctx context.Context, dir string) error
-	BeginManaged()
-	EndManaged()
-}
-
-// Config wires the switch handler to the process runner, the git collector,
-// the poller repoint, and the health probe. Collect, Repoint and Health are
-// injected (rather than importing the pollers/runner directly) so the handler
-// stays unit-testable with fakes.
+// Config wires the switch handler to its token and the orchestrator that owns
+// the switch.
 type Config struct {
-	// Token is the per-process CSRF token minted with crypto/rand at startup;
-	// a request must echo it in the X-Marquee-Token header. Empty disables the
+	// Token is the per-process CSRF token minted with crypto/rand at startup; a
+	// request must echo it in the X-Marquee-Token header. Empty disables the
 	// endpoint's happy path (every request fails the token check).
 	Token string
-	// Runner restarts the child in the chosen worktree.
-	Runner Runner
-	// Collect reads a fresh git Snapshot from a directory. The switch validates
-	// the requested slug against Collect's Worktrees — git's own worktree list
-	// — never against the filesystem.
-	Collect func(dir string) (gitinfo.Snapshot, error)
-	// Repoint moves the git/gh pollers to the new worktree after a switch, so
-	// the bar reports the worktree it actually restarted into. May be nil.
-	Repoint func(dir string)
-	// Health blocks until the restarted child accepts connections or ctx is
-	// done. May be nil (no health wait).
-	Health func(ctx context.Context) error
-	// ChildAlive reports whether the wrapped child process is currently running.
-	// The switch consults it right after the health probe: a TCP health probe can
-	// pass by connecting to a STALE listener — an escaped daemon left by the old
-	// child, still holding the internal port — so a passing probe alone does not
-	// prove the NEW child actually booted. If the child has exited, the switch is
-	// treated as a failure and reverted; marquee must never declare a switch
-	// successful on a dead child, nor shut itself down because of a switch. May be
-	// nil (the liveness check is skipped).
-	ChildAlive func() bool
-	// Dir is the worktree the child starts in (marquee's launch cwd).
-	Dir string
+	// Orchestrator owns the switch. The handler resolves and guards a request,
+	// then hands the plan to it.
+	Orchestrator *Orchestrator
 	// Logger receives operational messages. Defaults to log.Default().
 	Logger *log.Logger
-	// RestartTimeout bounds a single restart; defaults to 30s.
-	RestartTimeout time.Duration
-	// HealthTimeout bounds the post-restart health wait; defaults to 30s.
-	HealthTimeout time.Duration
-	// SwitchHook is an optional operator-supplied command run in the target
-	// worktree (cwd = git's own worktree path) before the child is restarted
-	// there, so a fresh worktree can be bootstrapped (e.g. "bundle install").
-	// It is CLI input, never influenced by the HTTP request or the slug, and is
-	// run through "sh -c" so pipelines/&& work. Empty disables it. Because the
-	// hook runs before the current child is stopped, a failing hook fails the
-	// switch without touching the running child (no restart, no revert): the dev
-	// server is simply left where it was. When a switch does get far enough to
-	// stop the child and then fails, the revert re-runs the hook in the previous
-	// worktree so an operator cleanup step (e.g. "rm -f .overmind.sock") can
-	// clear stale process-manager state before the child restarts there.
-	SwitchHook string
-	// HookTimeout bounds the switch hook; defaults to 5m (bootstrapping is slow).
-	HookTimeout time.Duration
 }
 
-// Handler serves POST /__marquee/switch.
+// Handler serves POST /__marquee/switch as a thin adapter over the orchestrator.
 type Handler struct {
-	token          string
-	runner         Runner
-	collect        func(dir string) (gitinfo.Snapshot, error)
-	repoint        func(dir string)
-	health         func(ctx context.Context) error
-	childAlive     func() bool
-	logger         *log.Logger
-	restartTimeout time.Duration
-	healthTimeout  time.Duration
-	switchHook     string
-	hookTimeout    time.Duration
+	token  string
+	orch   *Orchestrator
+	logger *log.Logger
 
-	mu         sync.Mutex // serializes switches; guards busy and currentDir
-	busy       bool
-	currentDir string
-
-	// slug reports the in-progress target for the proxy's switching page;
-	// stored as an atomic string so the proxy reads it without the mutex.
-	slug atomic.Value
+	mu   sync.Mutex // serializes switches
+	busy bool
 }
 
-// New builds a switch handler.
+// New builds a switch handler. The orchestrator is a hard precondition: a nil
+// one is a wiring bug in main, so fail deterministically at construction
+// rather than panicking on the first switch request.
 func New(cfg Config) *Handler {
+	if cfg.Orchestrator == nil {
+		panic("switcher: Config.Orchestrator is required")
+	}
 	h := &Handler{
-		token:          cfg.Token,
-		runner:         cfg.Runner,
-		collect:        cfg.Collect,
-		repoint:        cfg.Repoint,
-		health:         cfg.Health,
-		childAlive:     cfg.ChildAlive,
-		logger:         cfg.Logger,
-		currentDir:     cfg.Dir,
-		restartTimeout: orDuration(cfg.RestartTimeout, 30*time.Second),
-		healthTimeout:  orDuration(cfg.HealthTimeout, 30*time.Second),
-		switchHook:     cfg.SwitchHook,
-		hookTimeout:    orDuration(cfg.HookTimeout, 5*time.Minute),
+		token:  cfg.Token,
+		orch:   cfg.Orchestrator,
+		logger: cfg.Logger,
 	}
 	if h.logger == nil {
 		h.logger = log.Default()
 	}
-	h.slug.Store("")
 	return h
 }
 
@@ -148,22 +75,10 @@ func Register(mux *proxy.InternalMux, h *Handler) {
 	mux.Handle("POST /__marquee/switch", http.HandlerFunc(h.serve))
 }
 
-// Progress reports the in-progress switch's phase and slug (empty when idle),
-// satisfying proxy.SwitchSource so the interstitial can be served without the
-// proxy importing this package.
-func (h *Handler) Progress() switching.Progress {
-	s, _ := h.slug.Load().(string)
-	phase := switching.Idle
-	if s != "" {
-		phase = switching.Booting
-	}
-	return switching.Progress{Phase: phase, Slug: s}
-}
-
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
-	// Guard order, all required: same-origin, then constant-time token, then
-	// the concurrency lock, then a strict slug lookup, then dirty-safety.
-	// Every failure returns before any process action.
+	// Guard order, all required: same-origin, then constant-time token, then the
+	// concurrency lock, then a strict slug lookup, then dirty-safety. Every
+	// failure returns before any process action.
 	if !sameOrigin(r) {
 		writeError(w, http.StatusForbidden, "forbidden_origin", "cross-origin switch rejected")
 		return
@@ -186,7 +101,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.busy = true
-	dir := h.currentDir
 	h.mu.Unlock()
 	defer func() {
 		h.mu.Lock()
@@ -194,226 +108,64 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		h.mu.Unlock()
 	}()
 
-	snap, err := h.collect(dir)
+	plan, err := h.orch.Prepare(req.Slug)
+	if errors.Is(err, ErrUnknownSlug) {
+		writeError(w, http.StatusBadRequest, "unknown_slug", "slug is not a known worktree")
+		return
+	}
 	if err != nil {
 		h.logf("switch: reading worktree list failed: %v", err)
 		writeError(w, http.StatusInternalServerError, "git", "could not read the worktree list")
 		return
 	}
 
-	// The slug is only ever an exact-match key into git's own worktree list;
-	// the absolute path comes from git's output, never from the request. An
-	// unknown slug or any traversal shape simply fails to match.
-	target, ok := resolveWorktree(snap.Worktrees, req.Slug)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "unknown_slug", "slug is not a known worktree")
-		return
-	}
-	targetIsMain := len(snap.Worktrees) > 0 && target.Path == snap.Worktrees[0].Path
-
-	// A dirty current worktree needs explicit confirmation, except switching
-	// back to main which is always allowed.
-	if snap.Dirty && !targetIsMain && !req.Confirm {
+	// A dirty current worktree needs explicit confirmation, except switching back
+	// to main which is always allowed.
+	if plan.Dirty && !plan.IsMain && !req.Confirm {
 		writeError(w, http.StatusConflict, "dirty", "current worktree has uncommitted changes; confirm to switch")
 		return
 	}
 
-	// prevDir is the worktree the child is running in now. If the switch fails
-	// to come up healthy, the switcher reverts the child back to it, so a bad
-	// switch leaves marquee exactly where it started rather than dead.
-	prevDir := dir
+	// A background context so a client that disconnects mid-switch never aborts
+	// the switch and strands the child: a switch runs to a healthy target or a
+	// completed revert regardless.
+	writeSwitchResult(w, h.orch.Switch(context.Background(), plan))
+}
 
-	// The whole switch — target restart, health wait, and any revert — is a
-	// managed lifecycle window. A child exit inside it belongs to the switcher,
-	// never to main's shutdown path: main must not tear marquee down because a
-	// switched-into dev server failed to boot.
-	h.runner.BeginManaged()
-	defer h.runner.EndManaged()
-
-	h.setSwitching(target.Slug)
-	defer h.setSwitching("")
-
-	// Bootstrap the target BEFORE the current child is stopped. The hook runs
-	// while the old child is still up and untouched, so a hook failure here has
-	// stopped nothing and there is nothing to recover: report the failure and
-	// leave the healthy child exactly where it is. A revert restart at this
-	// point would be pointless work that can itself race its own teardown into a
-	// stale process-manager socket and leave the dev server dead after what was
-	// only a harmless hook failure.
-	if err := h.runSwitchHook(target.Path); err != nil {
-		h.logf("switch to %q failed in switch-hook: %v; left the child running in %q untouched", target.Slug, err, prevDir)
+// writeSwitchResult renders a switch outcome to the response. The status and
+// body shapes are the HTTP contract bar.js depends on and are unchanged by the
+// move to the orchestrator: a success is 200 with the target's identity; every
+// failure is a 502 switch_failed carrying the reverted flag and a human message.
+func writeSwitchResult(w http.ResponseWriter, res Result) {
+	switch res.Outcome {
+	case OutcomeSuccess:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"slug":   res.Slug,
+			"path":   res.Path,
+			"isMain": res.IsMain,
+		})
+	case OutcomeHookFailedBeforeStart:
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error":    "switch_failed",
 			"reverted": true,
-			"slug":     target.Slug,
+			"slug":     res.Slug,
 			"message":  "switch-hook failed before the switch began; the dev server was left running on the previous worktree",
 		})
-		return
-	}
-
-	switchErr := h.switchInto(target.Path)
-	if switchErr == nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":     true,
-			"slug":   target.Slug,
-			"path":   target.Path,
-			"isMain": targetIsMain,
+	case OutcomeReverted:
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":    "switch_failed",
+			"reverted": true,
+			"slug":     res.Slug,
+			"message":  "target worktree did not become healthy; reverted to the previous worktree",
 		})
-		return
-	}
-	h.logf("switch to %q failed: %v; reverting to %q", target.Slug, switchErr, prevDir)
-
-	// The forward attempt failed only after it had already stopped the old
-	// child, so recover by restarting the previous worktree. Revert exactly
-	// once. Whether the revert itself comes up healthy or not, marquee stays
-	// alive (a dead-but-alive marquee the user can retry beats one that
-	// vanished); the response always reports the switch as a failure, never a
-	// fake success.
-	if err := h.revertInto(prevDir); err != nil {
-		h.logf("revert to %q also failed: %v", prevDir, err)
+	case OutcomeBothFailed:
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error":    "switch_failed",
 			"reverted": false,
-			"slug":     target.Slug,
+			"slug":     res.Slug,
 			"message":  "target worktree did not become healthy and the revert also failed; the dev server is down — retry or switch back",
 		})
-		return
-	}
-	writeJSON(w, http.StatusBadGateway, map[string]any{
-		"error":    "switch_failed",
-		"reverted": true,
-		"slug":     target.Slug,
-		"message":  "target worktree did not become healthy; reverted to the previous worktree",
-	})
-}
-
-// switchInto restarts the child in dir and waits for it to become healthy. On
-// success it repoints the pollers and records dir as the current worktree; on
-// failure (the restart could not start, or the child never became healthy) it
-// returns the error and leaves currentDir untouched so a revert restores it. It
-// deliberately does NOT run the switch hook: bootstrapping happens once, before
-// the child is stopped (see serve), so a hook failure is handled there and
-// never reaches this restart step.
-func (h *Handler) switchInto(dir string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), h.restartTimeout)
-	defer cancel()
-	if err := h.runner.Restart(ctx, dir); err != nil {
-		return err
-	}
-
-	if h.health != nil {
-		hctx, hcancel := context.WithTimeout(context.Background(), h.healthTimeout)
-		err := h.health(hctx)
-		hcancel()
-		if err != nil {
-			return err
-		}
-	}
-
-	// A passing health probe is not proof the new child booted: with a
-	// daemonizing process manager, the probe can connect to a STALE listener an
-	// escaped remnant of the OLD child is still holding. Require the child to be
-	// actually running, so a switch to a child that has exited is a failure (and
-	// reverts) rather than a fake success that later shuts marquee down.
-	if h.childAlive != nil && !h.childAlive() {
-		return fmt.Errorf("child exited before becoming healthy in %s", dir)
-	}
-
-	h.mu.Lock()
-	h.currentDir = dir
-	h.mu.Unlock()
-	if h.repoint != nil {
-		h.repoint(dir)
-	}
-	return nil
-}
-
-// revertInto brings the child back to the previous, already-working worktree
-// after a failed forward switch. It runs the switch hook there first — unlike a
-// plain switchInto. The forward attempt stopped the old child, and its process
-// manager (overmind, tmux) may have left a stale socket (e.g. .overmind.sock)
-// that makes a clean reboot in the previous worktree fail ("already running").
-// An operator hook such as "rm -f .overmind.sock" clears that so the revert can
-// actually come back up. Re-bootstrapping a worktree that already worked is a
-// little wasteful, but that cost is minor next to leaving the dev server dead.
-// The hook is operator CLI input, never request-derived (see docs/security.md,
-// Threat 4), so running it on the revert widens no attack surface. A hook
-// failure here is logged, not fatal: the previous worktree already booted once,
-// so recovery still attempts the restart rather than stranding the user on a
-// spurious hook error — if the restart then fails, the both-failed path reports
-// it honestly.
-func (h *Handler) revertInto(dir string) error {
-	if err := h.runSwitchHook(dir); err != nil {
-		h.logf("revert switch-hook in %q failed; restarting the previously-working worktree anyway: %v", dir, err)
-	}
-	return h.switchInto(dir)
-}
-
-// runSwitchHook runs the operator's switch hook in the target worktree so a
-// fresh worktree can be bootstrapped before the child starts there. It is a
-// no-op when no hook is configured. The hook's stdout and stderr are streamed
-// to marquee's logger, prefixed, so the user sees bootstrap progress and
-// errors; a non-zero exit or a timeout returns an error, which the caller turns
-// into a reverting switch failure.
-func (h *Handler) runSwitchHook(dir string) error {
-	if h.switchHook == "" {
-		return nil
-	}
-	h.logf("switch-hook: running %q in %s", h.switchHook, dir)
-
-	ctx, cancel := context.WithTimeout(context.Background(), h.hookTimeout)
-	defer cancel()
-
-	// #nosec G204 -- switchHook is the operator's own CLI flag value (like the
-	// wrapped dev command itself), never derived from the HTTP request or the
-	// slug; dir is git's own worktree path, not request input. Running it via
-	// "sh -c" is deliberate so operators can write pipelines and && chains.
-	cmd := exec.CommandContext(ctx, "sh", "-c", h.switchHook)
-	cmd.Dir = dir
-	// Run the hook in its own process group and kill the whole group on
-	// timeout, so a hook like "bundle install" doesn't leak its children
-	// (ruby, native builds) when it hangs — mirroring how the runner reaps
-	// the child. WaitDelay bounds how long we wait for I/O to drain after.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = 5 * time.Second
-	out := &hookOutput{logf: h.logf}
-	cmd.Stdout = out
-	cmd.Stderr = out
-	err := cmd.Run()
-	out.flush()
-	if err != nil {
-		return fmt.Errorf("switch-hook %q failed: %w", h.switchHook, err)
-	}
-	return nil
-}
-
-// hookOutput forwards a subprocess's combined output to the logger one line at
-// a time, each line prefixed so switch-hook progress is distinguishable in
-// marquee's stderr. os/exec guarantees no concurrent Write when the same writer
-// is used for both Stdout and Stderr, so no lock is needed.
-type hookOutput struct {
-	logf func(string, ...any)
-	buf  []byte
-}
-
-func (o *hookOutput) Write(p []byte) (int, error) {
-	o.buf = append(o.buf, p...)
-	for {
-		i := bytes.IndexByte(o.buf, '\n')
-		if i < 0 {
-			break
-		}
-		o.logf("switch-hook: %s", o.buf[:i])
-		o.buf = o.buf[i+1:]
-	}
-	return len(p), nil
-}
-
-func (o *hookOutput) flush() {
-	if len(o.buf) > 0 {
-		o.logf("switch-hook: %s", o.buf)
-		o.buf = nil
 	}
 }
 
@@ -425,8 +177,6 @@ func (h *Handler) tokenOK(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) == 1
 }
 
-func (h *Handler) setSwitching(slug string) { h.slug.Store(slug) }
-
 func (h *Handler) logf(format string, args ...any) {
 	h.logger.Printf("marquee: "+format, args...)
 }
@@ -436,9 +186,9 @@ type switchRequest struct {
 	Confirm bool   `json:"confirm"`
 }
 
-// parseSwitchRequest reads {slug, confirm} from a JSON body (what bar.js
-// sends) or, as a fallback, form values. The body is length-capped: the
-// payload is two tiny fields, so anything larger is not a legitimate switch.
+// parseSwitchRequest reads {slug, confirm} from a JSON body (what bar.js sends)
+// or, as a fallback, form values. The body is length-capped: the payload is two
+// tiny fields, so anything larger is not a legitimate switch.
 func parseSwitchRequest(r *http.Request) (switchRequest, error) {
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		var req switchRequest
@@ -456,10 +206,10 @@ func parseSwitchRequest(r *http.Request) (switchRequest, error) {
 	}, nil
 }
 
-// resolveWorktree returns the worktree whose slug exactly equals slug, and
-// only when exactly one does. Zero matches (unknown slug, or any traversal
-// shape that cannot equal a base-name slug) and an ambiguous duplicate slug
-// both fail, so the caller never acts on an unresolved target.
+// resolveWorktree returns the worktree whose slug exactly equals slug, and only
+// when exactly one does. Zero matches (unknown slug, or any traversal shape that
+// cannot equal a base-name slug) and an ambiguous duplicate slug both fail, so
+// the caller never acts on an unresolved target.
 func resolveWorktree(worktrees []gitinfo.Worktree, slug string) (gitinfo.Worktree, bool) {
 	var found gitinfo.Worktree
 	matches := 0
@@ -475,9 +225,9 @@ func resolveWorktree(worktrees []gitinfo.Worktree, slug string) (gitinfo.Worktre
 	return found, true
 }
 
-// sameOrigin is the strict same-origin gate for this process-spawning
-// endpoint. Sec-Fetch-Site is set by the browser and page JS cannot forge it:
-// only "same-origin" is accepted. Unlike the cosmetic toggle, "none" (a typed
+// sameOrigin is the strict same-origin gate for this process-spawning endpoint.
+// Sec-Fetch-Site is set by the browser and page JS cannot forge it: only
+// "same-origin" is accepted. Unlike the cosmetic toggle, "none" (a typed
 // address-bar navigation) is NOT accepted here — a switch must be provably
 // same-origin. When Sec-Fetch-Site is absent (older browsers, curl), it falls
 // back to requiring an Origin whose scheme+host+port equals the request Host.
@@ -516,11 +266,4 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
-}
-
-func orDuration(d, fallback time.Duration) time.Duration {
-	if d <= 0 {
-		return fallback
-	}
-	return d
 }

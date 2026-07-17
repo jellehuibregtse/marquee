@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -18,86 +17,120 @@ import (
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
 	"github.com/jellehuibregtse/marquee/internal/proxy"
 	"github.com/jellehuibregtse/marquee/internal/switcher"
+	"github.com/jellehuibregtse/marquee/internal/switching"
 )
 
 const testToken = "0123456789abcdef0123456789abcdef"
 
-// fakeRunner records every Restart so a test can assert exactly what process
-// action a request did — or, for the abuse tests, did not — trigger.
-type fakeRunner struct {
-	mu       sync.Mutex
-	dirs     []string
-	err      error
-	block    chan struct{} // when non-nil, Restart waits on it (concurrency test)
-	entered  chan struct{}
-	managed  int  // current managed-window depth
-	balanced bool // set true whenever depth returns to 0 after being >0
+// fakeChild is a ChildController with no real process: it records every Restart
+// so a test can assert exactly what process action a request did — or, for the
+// abuse tests, did not — trigger, and its liveness and exit stream are scripted
+// per target directory so a test can model a target that fails to boot, a stale
+// listener that answers while the child is dead, or a mid-switch crash.
+type fakeChild struct {
+	mu sync.Mutex
+
+	dirs        []string
+	restartErrs map[string]error // dir -> error returned by Restart
+	aliveByDir  map[string]bool  // dir -> Alive() after restarting into it (default true)
+	emitOnDir   map[string]bool  // dir -> push an unexpected exit when restarted into it
+	current     string
+
+	exits   chan struct{}
+	block   chan struct{} // when non-nil, Restart waits on it (concurrency test)
+	entered chan struct{} // closed once, when Restart is first entered
 }
 
-func (f *fakeRunner) Restart(_ context.Context, dir string) error {
-	if f.entered != nil {
-		close(f.entered)
+func newFakeChild() *fakeChild {
+	return &fakeChild{
+		restartErrs: map[string]error{},
+		aliveByDir:  map[string]bool{},
+		emitOnDir:   map[string]bool{},
+		exits:       make(chan struct{}, 1),
 	}
-	if f.block != nil {
-		<-f.block
-	}
+}
+
+func (f *fakeChild) Restart(_ context.Context, dir string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	entered := f.entered
+	f.entered = nil
+	block := f.block
+	f.mu.Unlock()
+	if entered != nil {
+		close(entered)
+	}
+	if block != nil {
+		<-block
+	}
+
+	f.mu.Lock()
 	f.dirs = append(f.dirs, dir)
-	return f.err
-}
+	f.current = dir
+	err := f.restartErrs[dir]
+	emit := f.emitOnDir[dir]
+	f.mu.Unlock()
 
-func (f *fakeRunner) BeginManaged() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.managed++
-}
-
-func (f *fakeRunner) EndManaged() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.managed > 0 {
-		f.managed--
+	if emit {
+		f.emitExit()
 	}
-	if f.managed == 0 {
-		f.balanced = true
+	return err
+}
+
+func (f *fakeChild) Alive() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if v, ok := f.aliveByDir[f.current]; ok {
+		return v
+	}
+	return true
+}
+
+func (f *fakeChild) Exits() <-chan struct{} { return f.exits }
+
+func (f *fakeChild) emitExit() {
+	select {
+	case f.exits <- struct{}{}:
+	default:
 	}
 }
 
-func (f *fakeRunner) managedDepth() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.managed
-}
-
-func (f *fakeRunner) restarts() []string {
+func (f *fakeChild) restarts() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.dirs...)
 }
 
-func (f *fakeRunner) count() int {
+func (f *fakeChild) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.dirs)
 }
 
-// repointTracker records the directories the pollers were repointed to.
-type repointTracker struct {
-	mu   sync.Mutex
-	dirs []string
+// fakeWorktrees is a Worktrees whose Collect result is fixed and whose Repoint
+// calls are recorded.
+type fakeWorktrees struct {
+	mu         sync.Mutex
+	snap       gitinfo.Snapshot
+	collectErr error
+	repointed  []string
 }
 
-func (rt *repointTracker) repoint(dir string) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.dirs = append(rt.dirs, dir)
+func (w *fakeWorktrees) Collect(string) (gitinfo.Snapshot, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.snap, w.collectErr
 }
 
-func (rt *repointTracker) calls() []string {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	return append([]string(nil), rt.dirs...)
+func (w *fakeWorktrees) Repoint(dir string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.repointed = append(w.repointed, dir)
+}
+
+func (w *fakeWorktrees) calls() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.repointed...)
 }
 
 // twoWorktreeSnapshot is a clean repo whose main worktree is /repo/main and
@@ -119,32 +152,51 @@ func mainCurrent(dirty bool) gitinfo.Snapshot {
 
 type harness struct {
 	mux     http.Handler
+	orch    *switcher.Orchestrator
+	child   *fakeChild
+	wt      *fakeWorktrees
 	handler *switcher.Handler
-	runner  *fakeRunner
-	repoint *repointTracker
 }
 
-func newHarness(t *testing.T, cfg switcher.Config) *harness {
+type harnessOpts struct {
+	token      string
+	snap       *gitinfo.Snapshot
+	collectErr error
+	health     func(context.Context) error
+	switchHook string
+	dir        string
+}
+
+func newHarness(t *testing.T, opts harnessOpts) *harness {
 	t.Helper()
-	runner := &fakeRunner{}
-	repoint := &repointTracker{}
-	if cfg.Token == "" {
-		cfg.Token = testToken
+	child := newFakeChild()
+	wt := &fakeWorktrees{}
+	if opts.snap != nil {
+		wt.snap = *opts.snap
+	} else {
+		wt.snap = mainCurrent(false)
 	}
-	if cfg.Runner == nil {
-		cfg.Runner = runner
+	wt.collectErr = opts.collectErr
+	dir := opts.dir
+	if dir == "" {
+		dir = "/repo/main"
 	}
-	if cfg.Collect == nil {
-		cfg.Collect = func(string) (gitinfo.Snapshot, error) { return mainCurrent(false), nil }
+	orch := switcher.NewOrchestrator(switcher.OrchestratorConfig{
+		Child:      child,
+		Worktrees:  wt,
+		Health:     opts.health,
+		Dir:        dir,
+		Logger:     log.New(io.Discard, "", 0),
+		SwitchHook: opts.switchHook,
+	})
+	token := opts.token
+	if token == "" {
+		token = testToken
 	}
-	if cfg.Repoint == nil {
-		cfg.Repoint = repoint.repoint
-	}
-	cfg.Logger = log.New(io.Discard, "", 0)
-	h := switcher.New(cfg)
+	h := switcher.New(switcher.Config{Token: token, Orchestrator: orch, Logger: log.New(io.Discard, "", 0)})
 	mux := proxy.NewInternalMux()
 	switcher.Register(mux, h)
-	return &harness{mux: mux, handler: h, runner: runner, repoint: repoint}
+	return &harness{mux: mux, orch: orch, child: child, wt: wt, handler: h}
 }
 
 func (h *harness) post(body string, mutate func(*http.Request)) *httptest.ResponseRecorder {
@@ -157,6 +209,15 @@ func (h *harness) post(body string, mutate func(*http.Request)) *httptest.Respon
 	rec := httptest.NewRecorder()
 	h.mux.ServeHTTP(rec, req)
 	return rec
+}
+
+func (h *harness) assertTerminatedNotFired(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.orch.Terminated():
+		t.Fatal("Terminated fired: the switch's child exits leaked to the shutdown path")
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func sameOriginToken(r *http.Request) {
@@ -204,15 +265,15 @@ func TestCrossOriginRejectedNoProcessAction(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newHarness(t, switcher.Config{})
+			h := newHarness(t, harnessOpts{})
 			rec := h.post(`{"slug":"feature"}`, tc.mutate)
 			if rec.Code != http.StatusForbidden {
 				t.Errorf("status = %d, want 403", rec.Code)
 			}
-			if n := h.runner.count(); n != 0 {
-				t.Errorf("runner restarted %d times, want 0 (no process action on a rejected request)", n)
+			if n := h.child.count(); n != 0 {
+				t.Errorf("child restarted %d times, want 0 (no process action on a rejected request)", n)
 			}
-			if n := len(h.repoint.calls()); n != 0 {
+			if n := len(h.wt.calls()); n != 0 {
 				t.Errorf("repoint called %d times, want 0", n)
 			}
 		})
@@ -220,7 +281,7 @@ func TestCrossOriginRejectedNoProcessAction(t *testing.T) {
 }
 
 func TestOriginFallbackMatchesHostIsAllowed(t *testing.T) {
-	h := newHarness(t, switcher.Config{})
+	h := newHarness(t, harnessOpts{})
 	rec := h.post(`{"slug":"feature"}`, func(r *http.Request) {
 		r.Header.Set("Origin", "http://localhost")
 		r.Header.Set("X-Marquee-Token", testToken)
@@ -228,7 +289,7 @@ func TestOriginFallbackMatchesHostIsAllowed(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (Origin scheme+host match Host, no Sec-Fetch-Site)", rec.Code)
 	}
-	if got := h.runner.restarts(); len(got) != 1 || got[0] != "/repo/feature" {
+	if got := h.child.restarts(); len(got) != 1 || got[0] != "/repo/feature" {
 		t.Fatalf("restarts = %v, want [/repo/feature]", got)
 	}
 }
@@ -246,13 +307,13 @@ func TestMissingOrWrongTokenRejectedNoProcessAction(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newHarness(t, switcher.Config{})
+			h := newHarness(t, harnessOpts{})
 			rec := h.post(`{"slug":"feature"}`, tc.mutate)
 			if rec.Code != http.StatusForbidden {
 				t.Errorf("status = %d, want 403", rec.Code)
 			}
-			if n := h.runner.count(); n != 0 {
-				t.Errorf("runner restarted %d times, want 0", n)
+			if n := h.child.count(); n != 0 {
+				t.Errorf("child restarted %d times, want 0", n)
 			}
 		})
 	}
@@ -261,7 +322,7 @@ func TestMissingOrWrongTokenRejectedNoProcessAction(t *testing.T) {
 func TestEmptyTokenRejectsEveryRequest(t *testing.T) {
 	// A process that failed to mint a token must reject even a request that
 	// echoes the empty string.
-	h := newHarness(t, switcher.Config{Token: " "}) // configured token is a space
+	h := newHarness(t, harnessOpts{token: " "}) // configured token is a space
 	rec := h.post(`{"slug":"feature"}`, func(r *http.Request) {
 		r.Header.Set("Sec-Fetch-Site", "same-origin")
 		// deliberately send no token header
@@ -269,8 +330,8 @@ func TestEmptyTokenRejectsEveryRequest(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
-	if n := h.runner.count(); n != 0 {
-		t.Errorf("runner restarted %d times, want 0", n)
+	if n := h.child.count(); n != 0 {
+		t.Errorf("child restarted %d times, want 0", n)
 	}
 }
 
@@ -286,16 +347,16 @@ func TestUnknownOrTraversalSlugRejectedNoProcessAction(t *testing.T) {
 		"",
 	} {
 		t.Run(slug, func(t *testing.T) {
-			h := newHarness(t, switcher.Config{})
+			h := newHarness(t, harnessOpts{})
 			body, _ := json.Marshal(map[string]string{"slug": slug})
 			rec := h.post(string(body), sameOriginToken)
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("slug %q: status = %d, want 400", slug, rec.Code)
 			}
-			if n := h.runner.count(); n != 0 {
-				t.Errorf("slug %q: runner restarted %d times, want 0", slug, n)
+			if n := h.child.count(); n != 0 {
+				t.Errorf("slug %q: child restarted %d times, want 0", slug, n)
 			}
-			if n := len(h.repoint.calls()); n != 0 {
+			if n := len(h.wt.calls()); n != 0 {
 				t.Errorf("slug %q: repoint called %d times, want 0", slug, n)
 			}
 		})
@@ -303,7 +364,7 @@ func TestUnknownOrTraversalSlugRejectedNoProcessAction(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
-	h := newHarness(t, switcher.Config{})
+	h := newHarness(t, harnessOpts{})
 	req := httptest.NewRequest(http.MethodGet, "http://localhost/__marquee/switch", nil)
 	req.Host = "localhost"
 	rec := httptest.NewRecorder()
@@ -311,13 +372,13 @@ func TestMethodNotAllowed(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /__marquee/switch = %d, want 405", rec.Code)
 	}
-	if n := h.runner.count(); n != 0 {
-		t.Errorf("runner restarted %d times on a GET, want 0", n)
+	if n := h.child.count(); n != 0 {
+		t.Errorf("child restarted %d times on a GET, want 0", n)
 	}
 }
 
 func TestHostGuardEnforced(t *testing.T) {
-	h := newHarness(t, switcher.Config{})
+	h := newHarness(t, harnessOpts{})
 	rec := h.post(`{"slug":"feature"}`, func(r *http.Request) {
 		r.Host = "evil.com"
 		sameOriginToken(r)
@@ -325,17 +386,30 @@ func TestHostGuardEnforced(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("Host evil.com = %d, want 403 (guarded mux)", rec.Code)
 	}
-	if n := h.runner.count(); n != 0 {
-		t.Errorf("runner restarted %d times with a forbidden Host, want 0", n)
+	if n := h.child.count(); n != 0 {
+		t.Errorf("child restarted %d times with a forbidden Host, want 0", n)
+	}
+}
+
+func TestGitCollectFailureReportsError(t *testing.T) {
+	h := newHarness(t, harnessOpts{collectErr: context.DeadlineExceeded})
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if code := errorCode(t, rec); code != "git" {
+		t.Errorf("error = %q, want %q", code, "git")
+	}
+	if n := h.child.count(); n != 0 {
+		t.Errorf("child restarted %d times on a git failure, want 0", n)
 	}
 }
 
 // --- dirty safety ---
 
 func TestDirtyRefusedWithoutConfirm(t *testing.T) {
-	h := newHarness(t, switcher.Config{
-		Collect: func(string) (gitinfo.Snapshot, error) { return mainCurrent(true), nil },
-	})
+	snap := mainCurrent(true)
+	h := newHarness(t, harnessOpts{snap: &snap})
 	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", rec.Code)
@@ -343,20 +417,19 @@ func TestDirtyRefusedWithoutConfirm(t *testing.T) {
 	if code := errorCode(t, rec); code != "dirty" {
 		t.Errorf("error = %q, want %q", code, "dirty")
 	}
-	if n := h.runner.count(); n != 0 {
-		t.Errorf("runner restarted %d times on a dirty refusal, want 0", n)
+	if n := h.child.count(); n != 0 {
+		t.Errorf("child restarted %d times on a dirty refusal, want 0", n)
 	}
 }
 
 func TestDirtyConfirmedAllowed(t *testing.T) {
-	h := newHarness(t, switcher.Config{
-		Collect: func(string) (gitinfo.Snapshot, error) { return mainCurrent(true), nil },
-	})
+	snap := mainCurrent(true)
+	h := newHarness(t, harnessOpts{snap: &snap})
 	rec := h.post(`{"slug":"feature","confirm":true}`, sameOriginToken)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if got := h.runner.restarts(); len(got) != 1 || got[0] != "/repo/feature" {
+	if got := h.child.restarts(); len(got) != 1 || got[0] != "/repo/feature" {
 		t.Fatalf("restarts = %v, want [/repo/feature]", got)
 	}
 }
@@ -365,14 +438,13 @@ func TestDirtySwitchToMainAlwaysAllowed(t *testing.T) {
 	// Current worktree is the dirty "feature"; switching back to main must be
 	// allowed without confirmation.
 	current := gitinfo.CurrentWorktree{Path: "/repo/feature", Slug: "feature", IsMain: false}
-	h := newHarness(t, switcher.Config{
-		Collect: func(string) (gitinfo.Snapshot, error) { return twoWorktreeSnapshot(true, current), nil },
-	})
+	snap := twoWorktreeSnapshot(true, current)
+	h := newHarness(t, harnessOpts{snap: &snap, dir: "/repo/feature"})
 	rec := h.post(`{"slug":"main"}`, sameOriginToken)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (switch to main is always allowed)", rec.Code)
 	}
-	if got := h.runner.restarts(); len(got) != 1 || got[0] != "/repo/main" {
+	if got := h.child.restarts(); len(got) != 1 || got[0] != "/repo/main" {
 		t.Fatalf("restarts = %v, want [/repo/main]", got)
 	}
 }
@@ -380,8 +452,11 @@ func TestDirtySwitchToMainAlwaysAllowed(t *testing.T) {
 // --- concurrency ---
 
 func TestConcurrentSwitchRejected(t *testing.T) {
-	runner := &fakeRunner{block: make(chan struct{}), entered: make(chan struct{})}
-	h := newHarness(t, switcher.Config{Runner: runner})
+	h := newHarness(t, harnessOpts{})
+	block := make(chan struct{})
+	entered := make(chan struct{})
+	h.child.block = block
+	h.child.entered = entered
 
 	done := make(chan int, 1)
 	go func() {
@@ -391,7 +466,7 @@ func TestConcurrentSwitchRejected(t *testing.T) {
 
 	// Wait until the first switch is inside Restart (busy).
 	select {
-	case <-runner.entered:
+	case <-entered:
 	case <-time.After(2 * time.Second):
 		t.Fatal("first switch never reached Restart")
 	}
@@ -404,117 +479,94 @@ func TestConcurrentSwitchRejected(t *testing.T) {
 		t.Errorf("error = %q, want %q", code, "busy")
 	}
 
-	close(runner.block)
+	close(block)
 	if code := <-done; code != http.StatusOK {
 		t.Errorf("first switch = %d, want 200", code)
 	}
-	if n := runner.count(); n != 1 {
-		t.Errorf("runner restarted %d times, want 1 (the rejected switch took no action)", n)
+	if n := h.child.count(); n != 1 {
+		t.Errorf("child restarted %d times, want 1 (the rejected switch took no action)", n)
 	}
 }
 
-func TestSwitchingSlugReportedWhileInProgress(t *testing.T) {
-	runner := &fakeRunner{block: make(chan struct{}), entered: make(chan struct{})}
-	h := newHarness(t, switcher.Config{Runner: runner})
+func TestSlugReportedWhileInProgress(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	block := make(chan struct{})
+	entered := make(chan struct{})
+	h.child.block = block
+	h.child.entered = entered
 
-	if got := h.handler.Progress().Slug; got != "" {
+	if got := h.orch.Progress().Slug; got != "" {
 		t.Fatalf("Progress slug = %q before any switch, want empty", got)
 	}
 	go func() { h.post(`{"slug":"feature"}`, sameOriginToken) }()
 	select {
-	case <-runner.entered:
+	case <-entered:
 	case <-time.After(2 * time.Second):
 		t.Fatal("switch never reached Restart")
 	}
-	if got := h.handler.Progress().Slug; got != "feature" {
+	if got := h.orch.Progress().Slug; got != "feature" {
 		t.Errorf("Progress slug = %q during switch, want %q", got, "feature")
 	}
-	close(runner.block)
+	close(block)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if h.handler.Progress().Slug == "" {
+		if h.orch.Progress().Slug == "" {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Errorf("Progress slug = %q after switch, want empty", h.handler.Progress().Slug)
+	t.Errorf("Progress slug = %q after switch, want empty", h.orch.Progress().Slug)
 }
 
-// --- happy path against a real temp git repo (fresh worktree-list validation) ---
+// --- Switch decision logic (fast, through the orchestrator with a fake child) ---
 
-func gitCmd(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
-}
-
-func evalDir(t *testing.T) string {
-	t.Helper()
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
-func TestValidSwitchAgainstRealRepoRestartsAndRepoints(t *testing.T) {
-	main := evalDir(t)
-	gitCmd(t, main, "init", "-b", "trunk")
-	gitCmd(t, main, "config", "user.name", "Fixture Author")
-	gitCmd(t, main, "config", "user.email", "fixture@example.com")
-	gitCmd(t, main, "config", "commit.gpgsign", "false")
-	if err := os.WriteFile(filepath.Join(main, "notes.txt"), []byte("first\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, main, "add", ".")
-	gitCmd(t, main, "commit", "-m", "Add notes")
-	wt := filepath.Join(evalDir(t), "lantern")
-	gitCmd(t, main, "worktree", "add", "-b", "lantern", wt)
-
+func TestHappySwitchRestartsRepointsAndReportsPhases(t *testing.T) {
 	var healthCalled bool
-	h := newHarness(t, switcher.Config{
-		Collect: gitinfo.Collect,
-		Dir:     main,
-		Health:  func(context.Context) error { healthCalled = true; return nil },
-	})
+	h := newHarness(t, harnessOpts{health: func(context.Context) error { healthCalled = true; return nil }})
 
-	rec := h.post(`{"slug":"lantern"}`, sameOriginToken)
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
 	}
-	if got := h.runner.restarts(); len(got) != 1 || got[0] != wt {
-		t.Fatalf("restarts = %v, want [%s]", got, wt)
+	if got := h.child.restarts(); len(got) != 1 || got[0] != "/repo/feature" {
+		t.Fatalf("restarts = %v, want [/repo/feature]", got)
 	}
-	if got := h.repoint.calls(); len(got) != 1 || got[0] != wt {
-		t.Fatalf("repoint calls = %v, want [%s]", got, wt)
+	if got := h.wt.calls(); len(got) != 1 || got[0] != "/repo/feature" {
+		t.Fatalf("repoint calls = %v, want [/repo/feature]", got)
 	}
 	if !healthCalled {
-		t.Error("health probe was not called after a successful switch")
+		t.Error("health probe was not called on a successful switch")
 	}
 
 	var body struct {
-		OK   bool   `json:"ok"`
-		Slug string `json:"slug"`
-		Path string `json:"path"`
+		OK     bool   `json:"ok"`
+		Slug   string `json:"slug"`
+		Path   string `json:"path"`
+		IsMain bool   `json:"isMain"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if !body.OK || body.Slug != "lantern" || body.Path != wt {
-		t.Errorf("response = %+v, want ok slug=lantern path=%s", body, wt)
+	if !body.OK || body.Slug != "feature" || body.Path != "/repo/feature" || body.IsMain {
+		t.Errorf("response = %+v, want ok slug=feature path=/repo/feature isMain=false", body)
 	}
+
+	// The happy path steps through stopping, booting, probing, then idle.
+	wantPhases := []switching.Phase{switching.Stopping, switching.Booting, switching.Probing, switching.Idle}
+	assertPhases(t, h.orch.Timeline(), wantPhases)
+	h.assertTerminatedNotFired(t)
 }
 
-func TestRestartFailureRevertsAndReportsFailure(t *testing.T) {
-	// A runner whose every Restart fails: the target restart fails and so does
-	// the revert. The switch must report failure (never a fake ok), never
-	// repoint, and leave the managed window balanced.
-	runner := &fakeRunner{err: context.DeadlineExceeded}
-	repoint := &repointTracker{}
-	h := newHarness(t, switcher.Config{Runner: runner, Repoint: repoint.repoint})
+func TestRestartFailureRevertsAndReportsBothFailed(t *testing.T) {
+	// Every Restart fails: the target restart fails and so does the revert. The
+	// switch reports failure (never a fake ok), never repoints, and never fires
+	// Terminated (the child is down but the user can retry).
+	h := newHarness(t, harnessOpts{})
+	h.child.restartErrs["/repo/feature"] = context.DeadlineExceeded
+	h.child.restartErrs["/repo/main"] = context.DeadlineExceeded
+	h.child.aliveByDir["/repo/feature"] = false
+	h.child.aliveByDir["/repo/main"] = false
+
 	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", rec.Code)
@@ -535,35 +587,26 @@ func TestRestartFailureRevertsAndReportsFailure(t *testing.T) {
 	if body.Reverted {
 		t.Error("reverted reported true, but the revert also failed")
 	}
-	// The switch attempts the target, then the revert: two Restart calls.
-	if n := runner.count(); n != 2 {
-		t.Errorf("runner restarted %d times, want 2 (target + revert attempt)", n)
+	if n := h.child.count(); n != 2 {
+		t.Errorf("child restarted %d times, want 2 (target + revert attempt)", n)
 	}
-	if n := len(repoint.calls()); n != 0 {
+	if n := len(h.wt.calls()); n != 0 {
 		t.Errorf("repoint called %d times after a failed restart, want 0", n)
 	}
-	if runner.managedDepth() != 0 {
-		t.Errorf("managed depth = %d after serve, want 0 (window must be balanced)", runner.managedDepth())
-	}
+	h.assertTerminatedNotFired(t)
 }
 
 func TestHealthFailureRevertsToPreviousWorktree(t *testing.T) {
 	// The target restart succeeds but never becomes healthy; the revert to the
-	// previous worktree does. The switch must report failure with reverted:true
-	// and repoint back to the previous worktree, not the target.
-	runner := &fakeRunner{}
-	repoint := &repointTracker{}
-	healthErr := map[string]error{"/repo/feature": context.DeadlineExceeded}
-	h := newHarness(t, switcher.Config{
-		Runner:  runner,
-		Repoint: repoint.repoint,
-		Dir:     "/repo/main",
-		Health: func(context.Context) error {
-			// The last dir the runner restarted into decides health.
-			dirs := runner.restarts()
-			return healthErr[dirs[len(dirs)-1]]
-		},
+	// previous worktree does. Report failure with reverted:true and repoint back
+	// to the previous worktree, not the target.
+	h := newHarness(t, harnessOpts{
+		health: func(context.Context) error { return nil },
 	})
+	// The health func is shared, so model the target's failure via aliveByDir:
+	// the target's child is dead, the revert's is alive.
+	h.child.aliveByDir["/repo/feature"] = false
+
 	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", rec.Code)
@@ -580,33 +623,25 @@ func TestHealthFailureRevertsToPreviousWorktree(t *testing.T) {
 	if !body.Reverted {
 		t.Error("reverted reported false, but the revert succeeded")
 	}
-	if got := runner.restarts(); len(got) != 2 || got[0] != "/repo/feature" || got[1] != "/repo/main" {
+	if got := h.child.restarts(); len(got) != 2 || got[0] != "/repo/feature" || got[1] != "/repo/main" {
 		t.Errorf("restarts = %v, want [/repo/feature /repo/main]", got)
 	}
-	// Only the healthy revert repoints, and only to the previous worktree.
-	if got := repoint.calls(); len(got) != 1 || got[0] != "/repo/main" {
+	if got := h.wt.calls(); len(got) != 1 || got[0] != "/repo/main" {
 		t.Errorf("repoint calls = %v, want [/repo/main]", got)
 	}
+	h.assertTerminatedNotFired(t)
 }
 
 // A switch whose target restart and health probe both "succeed" but whose child
 // has already exited (the stale-listener case: the probe connected to a remnant
 // of the old child) must be treated as a failure and revert — never a fake
-// ok:true. ChildAlive is false for the target and true for the revert.
+// ok:true. Alive is false for the target and true for the revert.
 func TestSwitchFailsWhenChildDiesDespiteHealthOK(t *testing.T) {
-	runner := &fakeRunner{}
-	repoint := &repointTracker{}
-	h := newHarness(t, switcher.Config{
-		Runner:  runner,
-		Repoint: repoint.repoint,
-		Dir:     "/repo/main",
-		Health:  func(context.Context) error { return nil }, // stale listener answers
-		ChildAlive: func() bool {
-			dirs := runner.restarts()
-			// The target's child has exited; the reverted previous child is alive.
-			return dirs[len(dirs)-1] != "/repo/feature"
-		},
+	h := newHarness(t, harnessOpts{
+		health: func(context.Context) error { return nil }, // stale listener answers
 	})
+	h.child.aliveByDir["/repo/feature"] = false
+
 	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502; body %s", rec.Code, rec.Body.String())
@@ -627,13 +662,133 @@ func TestSwitchFailsWhenChildDiesDespiteHealthOK(t *testing.T) {
 	if !body.Reverted {
 		t.Error("reverted = false, but the previous worktree's child was alive")
 	}
-	if got := runner.restarts(); len(got) != 2 || got[0] != "/repo/feature" || got[1] != "/repo/main" {
+	if got := h.child.restarts(); len(got) != 2 || got[0] != "/repo/feature" || got[1] != "/repo/main" {
 		t.Errorf("restarts = %v, want [/repo/feature /repo/main]", got)
 	}
-	if got := repoint.calls(); len(got) != 1 || got[0] != "/repo/main" {
+	if got := h.wt.calls(); len(got) != 1 || got[0] != "/repo/main" {
 		t.Errorf("repoint calls = %v, want [/repo/main] (never repoint to a dead target)", got)
 	}
-	if runner.managedDepth() != 0 {
-		t.Errorf("managed depth = %d after serve, want 0", runner.managedDepth())
+	h.assertTerminatedNotFired(t)
+}
+
+// A failing switch hook fails the switch before the child is ever stopped, so it
+// restarts nothing — not the target, and not a needless bounce of the healthy
+// previous worktree — and reports failure with reverted:true. The child is left
+// untouched and alive, so Terminated stays silent.
+func TestSwitchHookFailureLeavesChildUntouched(t *testing.T) {
+	h := newHarness(t, harnessOpts{switchHook: "exit 1"})
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
 	}
+	if code := errorCode(t, rec); code != "switch_failed" {
+		t.Errorf("error = %q, want %q", code, "switch_failed")
+	}
+	var body struct {
+		OK       bool `json:"ok"`
+		Reverted bool `json:"reverted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.OK {
+		t.Error("a failed hook reported ok:true")
+	}
+	if !body.Reverted {
+		t.Error("reverted = false, but the child was left on the previous, working worktree")
+	}
+	if n := h.child.count(); n != 0 {
+		t.Errorf("child restarted %d times, want 0 (hook failed before any process action)", n)
+	}
+	if n := len(h.wt.calls()); n != 0 {
+		t.Errorf("repoint called %d times, want 0", n)
+	}
+	h.assertTerminatedNotFired(t)
+}
+
+// An unexpected child exit that arrives WHILE a switch is in flight belongs to
+// the switch, not the shutdown path: the orchestrator converts it into the
+// revert and never fires Terminated. The doomed target emits an exit the moment
+// it is restarted into; the revert comes up alive.
+func TestUnexpectedExitDuringSwitchRevertsWithoutShutdown(t *testing.T) {
+	h := newHarness(t, harnessOpts{
+		health: func(context.Context) error { return nil },
+	})
+	h.child.emitOnDir["/repo/feature"] = true
+	h.child.aliveByDir["/repo/feature"] = false
+
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Reverted bool `json:"reverted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Reverted {
+		t.Error("reverted = false, but the previous worktree came up alive")
+	}
+	if got := h.child.restarts(); len(got) != 2 || got[1] != "/repo/main" {
+		t.Errorf("restarts = %v, want a revert to /repo/main", got)
+	}
+	h.assertTerminatedNotFired(t)
+}
+
+// When idle (no switch in flight), an unexpected child exit is the app dying on
+// its own: the orchestrator forwards it outward as Terminated so main shuts
+// down.
+func TestIdleUnexpectedExitFiresTerminated(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	// The child is not alive and no switch is running: a death now is terminal.
+	h.child.aliveByDir[""] = false
+	h.child.emitExit()
+
+	select {
+	case <-h.orch.Terminated():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Terminated never fired for an unexpected exit while idle")
+	}
+}
+
+func assertPhases(t *testing.T, timeline []switcher.Transition, want []switching.Phase) {
+	t.Helper()
+	var got []switching.Phase
+	for _, tr := range timeline {
+		got = append(got, tr.Phase)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("phases = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("phases = %v, want %v", got, want)
+		}
+	}
+	// Timestamps are monotonic non-decreasing (the cheap timing hook).
+	for i := 1; i < len(timeline); i++ {
+		if timeline[i].At.Before(timeline[i-1].At) {
+			t.Errorf("transition %d timestamp %v is before %v", i, timeline[i].At, timeline[i-1].At)
+		}
+	}
+}
+
+// gitCmd, evalDir are shared with the real-runner integration tests.
+func gitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+func evalDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

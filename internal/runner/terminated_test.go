@@ -11,35 +11,36 @@ import (
 	"time"
 )
 
-func terminatedFired(r *Runner) bool {
+func exitReported(r *Runner) bool {
 	select {
-	case <-r.Terminated():
+	case <-r.Exits():
 		return true
 	default:
 		return false
 	}
 }
 
-func assertNotTerminated(t *testing.T, r *Runner, within time.Duration) {
+func assertNoExitReported(t *testing.T, r *Runner, within time.Duration) {
 	t.Helper()
 	select {
-	case <-r.Terminated():
-		t.Fatal("Terminated fired, want it to stay open (this exit is not a terminal, unmanaged one)")
+	case <-r.Exits():
+		t.Fatal("an exit was reported on Exits, want none (this exit is one the runner caused)")
 	case <-time.After(within):
 	}
 }
 
-// Wrapper-mode regression: a child that exits on its own (no Stop, no Restart,
-// no managed window) must fire Terminated so cmd/marquee shuts down as before.
-func TestTerminatedFiresOnUnmanagedExit(t *testing.T) {
+// Wrapper-mode regression: a child that exits on its own (no Stop, no Restart)
+// is an unexpected termination and must be reported on Exits, so the switch
+// orchestrator can forward it and cmd/marquee shuts down.
+func TestExitReportedOnUnexpectedExit(t *testing.T) {
 	r := New([]string{"sh", "-c", "exit 3"}, nil, "", nil)
 	if err := r.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
-	case <-r.Terminated():
+	case <-r.Exits():
 	case <-time.After(2 * time.Second):
-		t.Fatal("Terminated never fired for a child that exited on its own")
+		t.Fatal("Exits never fired for a child that exited on its own")
 	}
 	st := r.Status()
 	if st.State != StateExited {
@@ -51,9 +52,27 @@ func TestTerminatedFiresOnUnmanagedExit(t *testing.T) {
 	}
 }
 
-// The transient stop during a healthy Restart must not fire the terminal-exit
-// signal. Run under -race: the wait goroutine and Restart touch the same state.
-func TestTerminatedNotFiredDuringRestart(t *testing.T) {
+// A Stop is an exit the runner caused: it must not be reported on Exits.
+func TestExitNotReportedOnStop(t *testing.T) {
+	r := New([]string{"sleep", "30"}, nil, "", nil)
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := r.Stop(ctx, nil); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if r.Alive() {
+		t.Fatal("child still alive after Stop")
+	}
+	assertNoExitReported(t, r, 200*time.Millisecond)
+}
+
+// The transient stop during a healthy Restart is runner-caused and must not be
+// reported. Run under -race: the wait goroutine and Restart touch the same
+// state (the stopping flag).
+func TestExitNotReportedDuringRestart(t *testing.T) {
 	dir1 := mustEvalSymlinks(t, t.TempDir())
 	dir2 := mustEvalSymlinks(t, t.TempDir())
 	r := New([]string{"sleep", "30"}, nil, dir1, nil)
@@ -67,38 +86,16 @@ func TestTerminatedNotFiredDuringRestart(t *testing.T) {
 	if err := r.Restart(ctx, dir2); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	if got := r.Status().State; got != StateRunning {
-		t.Fatalf("state after restart = %q, want running", got)
+	if !r.Alive() {
+		t.Fatalf("child not alive after restart")
 	}
-	assertNotTerminated(t, r, 200*time.Millisecond)
+	assertNoExitReported(t, r, 200*time.Millisecond)
 }
 
-// A managed window (what the switcher opens for the whole switch) suppresses
-// Terminated even when the child dies inside it, and — crucially — closing the
-// window does not retroactively fire it. This is what keeps marquee alive when
-// a switch's target and revert both fail to boot.
-func TestManagedWindowSuppressesTerminatedForever(t *testing.T) {
-	r := New([]string{"sleep", "30"}, nil, "", nil)
-	if err := r.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	r.BeginManaged()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := r.Stop(ctx, nil); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	if terminatedFired(r) {
-		t.Fatal("Terminated fired for an exit inside a managed window")
-	}
-	r.EndManaged()
-	assertNotTerminated(t, r, 200*time.Millisecond)
-}
-
-// After a successful restart the managed window is closed; a later natural death
-// of the new child must fire Terminated, so marquee still shuts down when the
-// dev server dies on its own after a switch (contract 4, post-switch).
-func TestTerminatedFiresAfterRestartOnNaturalDeath(t *testing.T) {
+// After a successful restart the new child is re-armed: a later natural death
+// of it must be reported, so marquee still shuts down when the dev server dies
+// on its own after a switch settles.
+func TestExitReportedAfterRestartOnNaturalDeath(t *testing.T) {
 	r := New([]string{"sleep", "30"}, nil, "", nil)
 	if err := r.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -108,14 +105,17 @@ func TestTerminatedFiresAfterRestartOnNaturalDeath(t *testing.T) {
 	if err := r.Restart(ctx, ""); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
+	if exitReported(r) {
+		t.Fatal("an exit was reported for the restart's transient stop")
+	}
 	// Kill the restarted child's process group out-of-band so it looks like a
 	// natural, unmanaged death (no Stop/Restart involved).
 	if err := r.Signal(syscall.SIGKILL); err != nil {
 		t.Fatalf("Signal: %v", err)
 	}
 	select {
-	case <-r.Terminated():
+	case <-r.Exits():
 	case <-time.After(2 * time.Second):
-		t.Fatal("Terminated never fired for a natural death after a restart")
+		t.Fatal("Exits never fired for a natural death after a restart")
 	}
 }

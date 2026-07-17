@@ -509,31 +509,34 @@ are not installed): the restarted child exits, or never accepts connections
 within the health timeout. Two properties keep such a failure from stranding the
 user:
 
-- **The shutdown path is switch-aware.** marquee wraps a dev server; when the
-  child exits *on its own*, marquee shuts down (that is the correct "your dev
-  server died" behavior). But an exit that is part of a restart or switch is
-  **not** the app dying — it is expected. The runner distinguishes the two: a
-  child exit closes `Runner.Terminated()` (the channel `cmd/marquee` selects on
-  to shut down) **only** when no managed lifecycle window is open. `Restart`
-  opens such a window around its own stop→start, and the switcher opens one
-  around the *entire* switch — target restart, health wait, and any revert — via
-  `BeginManaged`/`EndManaged`. Closing the window never retroactively fires the
-  signal, so an exit that happened inside it stays the switcher's to handle. The
-  result: the transient stop of a healthy switch never shuts marquee down, and a
-  switched-into dev server that fails to boot never shuts marquee down either.
+- **Termination knowledge splits by who has it.** marquee wraps a dev server;
+  when the child exits *on its own*, marquee shuts down (that is the correct
+  "your dev server died" behavior). But an exit that is part of a restart or
+  switch is **not** the app dying — it is expected. The knowledge splits: the
+  **runner** knows about exits *it* caused — the stop half of `Stop` or `Restart`
+  — and swallows those at the source, never reporting them; every other exit it
+  reports on `Runner.Exits()`, a channel that re-arms across restarts. The
+  **switch orchestrator** is the sole consumer of `Exits()`. While a switch is in
+  flight it *owns* those exits — a target that fails to boot is converted into
+  the revert, not a shutdown — and after a switch that left the child
+  intentionally down (both legs failed) it keeps ignoring the child's death so a
+  user who does nothing is not torn down. Only an unexpected death nobody is
+  handling closes `Orchestrator.Terminated()`, the single outward channel
+  `cmd/marquee` selects on to shut down. The result: the transient stop of a
+  healthy switch never shuts marquee down, and a switched-into dev server that
+  fails to boot never shuts marquee down either.
 - **A switch requires a *live* child, not just an answering port.** A TCP health
   probe can pass by connecting to a **stale listener** — an escaped daemon left
   by the old child, still holding the internal port (see "Reclaiming the internal
   port"). So a passing probe alone does not prove the new child booted: the
-  switch also checks `ChildAlive` (the runner's `StateRunning`) right after the
-  probe. If the child has exited, the switch is a failure and reverts — it never
-  reports `{"ok":true}` on a dead child, which is what previously let a doomed
-  switch declare success, close its managed window, and then have the child's
-  exit observed as *unmanaged*, firing `Terminated` and shutting marquee down.
+  switch also checks the child is `Alive` (the runner's `StateRunning`) right
+  after the probe. If the child has exited, the switch is a failure and reverts —
+  it never reports `{"ok":true}` on a dead child, which is what previously let a
+  doomed switch declare success and then have the child's exit shut marquee down.
   Freeing the port (above) also makes the probe honest; the liveness check is the
   belt to the port-reclaim's braces.
-- **The switcher reverts, once, and never reports a fake success.** If the
-  target does not become healthy, the switcher restarts the child back in the
+- **The orchestrator reverts, once, and never reports a fake success.** If the
+  target does not become healthy, it restarts the child back in the
   **previous** worktree, repoints the pollers back, and restores its
   `currentDir`. If the reverted child is healthy, marquee continues on the
   previous worktree as if the switch never happened. The response is always a
@@ -553,8 +556,8 @@ it would otherwise fail. The optional `--switch-hook` command bootstraps the
 target worktree first: it runs in the target directory (`cwd` = git's worktree
 path) **before** the child is restarted there, via
 `exec.CommandContext(ctx, "sh", "-c", hookCmd)`, bounded by a hook timeout
-(default 5 minutes; bootstrapping is slow) that runs inside the same managed
-window and busy lock as the rest of the switch. Its stdout and stderr are
+(default 5 minutes; bootstrapping is slow) that runs inside the same in-flight
+switch and busy lock as the rest of the switch. Its stdout and stderr are
 streamed to marquee's stderr, prefixed `switch-hook: …`, so the operator sees
 progress and errors. It is **off by default** and, as Threat 4 records, is
 operator-only CLI input — never influenced by the HTTP request or the slug.
@@ -621,14 +624,18 @@ path **cleanly** (marquee stays alive, reports `switch_failed`, the user can
 recover) rather than being fooled by the stale listener into a fake success that
 later shuts marquee down.
 
-Known limitation (accepted): a switch's managed window suppresses child-exit
-shutdown until it closes. If a just-health-checked child dies in the sub-
-millisecond tail between passing the health probe and the window closing on an
-otherwise **successful** switch, that exit is suppressed and marquee keeps
-running with the child down (the proxy serves its unavailable page; the user
-can switch again or restart). The window is tiny and non-deterministic and the
-degradation is graceful, so this is left as-is rather than complicating the
-lifecycle guarantees that keep marquee alive across a failed switch.
+Known limitation (accepted): the orchestrator ignores the child's exits for the
+duration of a switch and, after a both-legs-failed switch, until a later switch
+brings a child back up. If a just-health-checked child dies in the sub-
+millisecond tail between passing the readiness gate on an otherwise
+**successful** switch and the switch settling, that exit is ignored and marquee
+keeps running with the child down (the proxy serves its unavailable page; the
+user can switch again or restart). The window is tiny and non-deterministic and
+the degradation is graceful, so this is left as-is rather than complicating the
+lifecycle guarantees that keep marquee alive across a failed switch. The monitor
+guards against a *stale* exit of a since-replaced child by also confirming the
+current child is not alive before forwarding, so a reverted-healthy switch is
+never mistaken for a death.
 
 **Token lifecycle.** The token is 256 bits from `crypto/rand`, hex-encoded (no
 HTML-special characters, so it embeds without escaping), minted **once** at
@@ -642,37 +649,49 @@ registers no switch endpoint. Golden fixtures stay valid because the token-less
 snippet is byte-identical to before; the tokened case is asserted separately
 with a fixed token, and no golden encodes the random value.
 
-- Code: `internal/switcher/switcher.go` (whole file — `Handler.serve` running
-  the hook before the child is stopped (a hook failure leaves the child
-  untouched), `switchInto` for the restart→health→**live-child**→repoint step,
-  `revertInto` for the single revert that re-runs the hook in the previous
-  worktree, the `ChildAlive` check that fails a switch to an exited child,
-  `runSwitchHook` for the operator hook run in the target — and, on a revert, the
-  previous — worktree);
-  `Runner.Terminated`, `Runner.BeginManaged`/`EndManaged`, the managed window in
-  `Runner.Restart`, `Runner.ReclaimPortOnRestart` and `freeLoopbackPort` /
-  `loopbackListeners` / `reapListener` (the kill-by-port reclaim), and the
-  managed-aware wait goroutine in `internal/runner/runner.go`; the
-  `child.Terminated()` select in `run`
+- Code: `internal/switcher/switcher.go` (the thin HTTP adapter — `Handler.serve`
+  running same-origin/token authz and the busy and dirty-confirm guard rails,
+  then handing a resolved `Plan` to the orchestrator; `writeSwitchResult` maps
+  the outcome to the unchanged status/body contract); `internal/switcher/orchestrator.go`
+  (the deep switch behind `Orchestrator.Switch` — running the hook before the
+  child is stopped so a hook failure leaves the child untouched, `switchInto` for
+  the restart→health→**live-child**→repoint step, `revertInto` for the single
+  revert that re-runs the hook in the previous worktree, the `Alive` check that
+  fails a switch to an exited child, `runSwitchHook` for the operator hook, the
+  `ChildController`/`Worktrees` ports, the phase timeline, and the `monitor` that
+  forwards only unhandled child deaths to `Terminated`);
+  `Runner.Exits` (re-arming, reporting only exits the runner did not cause),
+  `Runner.Alive`, the `stopping` flag that swallows Stop/Restart exits at the
+  source, and the wait goroutine in `internal/runner/runner.go` (BeginManaged /
+  EndManaged / the managed depth are gone); `Reclaimer.Free` and the kill-by-port
+  reclaim in `internal/port/port.go`; the `orch.Terminated()` select in `run`
   (`cmd/marquee/main.go`); `serveSwitching` / `renderSwitching` in
-  `internal/proxy/switching.go`; `SetSwitchingProbe` / `switchingSlug` and
-  `Config.SwitchToken` in `internal/proxy/proxy.go`; `barSnippetForToken` in
-  `internal/proxy/inject.go`; `Poller.Repoint` in `internal/gitinfo/poller.go`
-  and `internal/ghinfo/ghinfo.go`; the wiring (`mintToken`, `switcher.New`,
-  `switcher.Register`, `SetSwitchingProbe`, `child.ReclaimPortOnRestart`,
-  `ChildAlive`) in `cmd/marquee/main.go`.
+  `internal/proxy/switching.go`; the typed `SwitchSource` seam (`SetSwitchSource`
+  / `switchingSlug`) over `internal/switching` and `Config.SwitchToken` in
+  `internal/proxy/proxy.go`; `barSnippetForToken` in `internal/proxy/inject.go`;
+  `Poller.Repoint` in `internal/gitinfo/poller.go` and `internal/ghinfo/ghinfo.go`;
+  the wiring (`mintToken`, `switcher.NewOrchestrator`, `switcher.New`,
+  `switcher.Register`, `SetSwitchSource`, the construction-time `port.Reclaimer`)
+  in `cmd/marquee/main.go`.
 - Proven by: the abuse and happy-path tests listed under Threats 3 and 4,
   plus `TestDirtyRefusedWithoutConfirm`, `TestDirtyConfirmedAllowed`,
   `TestDirtySwitchToMainAlwaysAllowed`, `TestConcurrentSwitchRejected`,
-  `TestSwitchingSlugReportedWhileInProgress`,
+  `TestSlugReportedWhileInProgress`, `TestHappySwitchRestartsRepointsAndReportsPhases`,
+  `TestRestartFailureRevertsAndReportsBothFailed`,
   `TestHealthFailureRevertsToPreviousWorktree`,
   `TestSwitchFailsWhenChildDiesDespiteHealthOK` (a passing health probe on an
-  exited child is a reverting failure, never a fake `ok:true`) in
-  `internal/switcher/switcher_test.go`; the runner-level reclaim tests
-  `TestFreeLoopbackPortFastWhenFree` and `TestFreeLoopbackPortReapsEscapedListener`
+  exited child is a reverting failure, never a fake `ok:true`),
+  `TestSwitchHookFailureLeavesChildUntouched` (a failing hook restarts nothing
+  and leaves the child untouched, `Terminated` silent),
+  `TestUnexpectedExitDuringSwitchRevertsWithoutShutdown` (a child that dies
+  mid-switch is converted into the revert, never a shutdown), and
+  `TestIdleUnexpectedExitFiresTerminated` (a death with no switch in flight is
+  forwarded outward) in
+  `internal/switcher/switcher_test.go`; the port-reclaim tests
+  `TestFreeFastWhenFree` and `TestFreeReapsEscapedListener`
   (a Setsid listener squatting the internal port is reaped, the port ends up
   free, and exactly one non-secret reap line is logged) in
-  `internal/runner/runner_test.go`; the real-runner integration tests
+  `internal/port/port_test.go`; the real-runner integration tests
   `TestIntegrationHealthySwitchKeepsMarqueeUp`,
   `TestIntegrationFailedSwitchRevertsAndStaysAlive`,
   `TestIntegrationBothFailStaysAlive`,
@@ -682,9 +701,8 @@ with a fixed token, and no golden encodes the random value.
   `TestIntegrationDaemonPortFreedSwitchSucceeds` (the escaped listener is reaped
   so the healthy target's new child binds the freed port and truly serves it),
   `TestIntegrationSwitchHookRunsInTargetWorktree` (the hook's marker lands in the
-  target worktree and the child then boots there), `TestSwitchHookFailureLeavesChildUntouched`
-  (a failing hook restarts nothing — not the target and not a bounce of the
-  healthy child — and leaves the managed window balanced), `TestIntegrationFailingSwitchHookRevertsAndStaysAlive`
+  target worktree and the child then boots there),
+  `TestIntegrationFailingSwitchHookRevertsAndStaysAlive`
   (a failing hook reverts, stays alive, and never boots the target),
   `TestIntegrationSwitchHookRunsOnRevert` (the hook runs on both legs — forward
   and revert), `TestIntegrationRevertHookClearsStaleBlocker` (the revert hook is
@@ -692,10 +710,9 @@ with a fixed token, and no golden encodes the random value.
   so the revert recovers, reproducing the real incident) in
   `internal/switcher/integration_test.go` (each asserts the shutdown
   signal is or is not triggered against the real process lifecycle); the runner-level
-  lifecycle tests `TestTerminatedFiresOnUnmanagedExit` (wrapper-mode regression),
-  `TestTerminatedNotFiredDuringRestart` (`-race`),
-  `TestManagedWindowSuppressesTerminatedForever`,
-  `TestTerminatedFiresAfterRestartOnNaturalDeath` in
+  lifecycle tests `TestExitReportedOnUnexpectedExit` (wrapper-mode regression),
+  `TestExitNotReportedOnStop`, `TestExitNotReportedDuringRestart` (`-race`),
+  `TestExitReportedAfterRestartOnNaturalDeath` in
   `internal/runner/terminated_test.go`;
   `TestSwitchingPageServedWhileSwitching`, `TestSwitchingPageEscapesSlug`,
   `TestSwitchingProbeAbsentBehavesNormally` in

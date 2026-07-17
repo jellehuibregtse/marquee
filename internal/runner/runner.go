@@ -41,18 +41,17 @@ type Runner struct {
 	argv     []string
 	extraEnv []string
 
-	mu           sync.Mutex
-	dir          string
-	cmd          *exec.Cmd
-	state        State
-	exitErr      error
-	done         chan struct{}
-	managedDepth int
+	mu       sync.Mutex
+	dir      string
+	cmd      *exec.Cmd
+	state    State
+	exitErr  error
+	done     chan struct{}
+	stopping bool
 
 	reclaim PortReclaimer
 
-	terminated chan struct{}
-	termOnce   sync.Once
+	exits chan struct{}
 }
 
 // PortReclaimer frees marquee's internal loopback port of any escaped remnant
@@ -73,12 +72,12 @@ type PortReclaimer interface {
 // disable it.
 func New(argv []string, extraEnv []string, dir string, reclaim PortReclaimer) *Runner {
 	return &Runner{
-		argv:       argv,
-		extraEnv:   extraEnv,
-		dir:        dir,
-		reclaim:    reclaim,
-		state:      StateStarting,
-		terminated: make(chan struct{}),
+		argv:     argv,
+		extraEnv: extraEnv,
+		dir:      dir,
+		reclaim:  reclaim,
+		state:    StateStarting,
+		exits:    make(chan struct{}, 1),
 	}
 }
 
@@ -113,48 +112,51 @@ func (r *Runner) Start() error {
 		r.mu.Lock()
 		r.exitErr = err
 		r.state = StateExited
-		unmanaged := r.managedDepth == 0
+		// An exit the runner caused itself — the stop half of a Stop or Restart —
+		// is expected and swallowed at the source: it never reaches Exits. The
+		// stopping flag is cleared here, under the same lock that set it, so the
+		// next spawn's death is reported normally.
+		expected := r.stopping
+		r.stopping = false
 		r.mu.Unlock()
 		close(done)
-		// A terminal exit fires Terminated only when the runner's lifecycle
-		// is not being managed (a Stop, Restart, or a switcher-owned switch).
-		// An exit that is part of a managed operation is the switcher's to
-		// handle — main must not mistake it for the app dying on its own.
-		if unmanaged {
-			r.termOnce.Do(func() { close(r.terminated) })
+		if !expected {
+			r.emitExit()
 		}
 	}()
 	return nil
 }
 
-// Terminated is closed once, on the first terminal child exit that happens
-// while the runner's lifecycle is not being managed. Exits that are part of a
-// Restart or a switcher-owned switch (see BeginManaged/EndManaged) never close
-// it, so the shutdown path in main is switch-aware by construction: it treats
-// a closed Terminated as "the app died on its own", never as the transient
-// stop of a restart or the failure of a switch the switcher will revert.
-func (r *Runner) Terminated() <-chan struct{} { return r.terminated }
-
-// BeginManaged marks the start of a managed lifecycle window. While any such
-// window is open, a child exit does not close Terminated — the caller owns the
-// outcome. Windows nest (a Restart inside a switcher-managed switch), so it is
-// paired with EndManaged via a depth counter.
-func (r *Runner) BeginManaged() {
-	r.mu.Lock()
-	r.managedDepth++
-	r.mu.Unlock()
+// emitExit reports one unexpected child exit on the Exits channel without ever
+// blocking the wait goroutine. The channel is buffered to one: a child can only
+// die once per spawn, and the sole consumer (the switch orchestrator) drains it
+// promptly, so a full buffer means an earlier unhandled exit is already pending
+// and this one adds nothing.
+func (r *Runner) emitExit() {
+	select {
+	case r.exits <- struct{}{}:
+	default:
+	}
 }
 
-// EndManaged closes a window opened by BeginManaged. It never retroactively
-// fires Terminated: an exit that already happened inside the window stays the
-// caller's to handle, which is what keeps marquee alive after a switch whose
-// target and revert both fail to boot.
-func (r *Runner) EndManaged() {
+// Exits reports the child's UNEXPECTED terminations — exits marquee did not
+// cause itself. It receives one token per such exit and is never closed, so it
+// re-arms across restarts: a child that fails to boot during a switch, and a
+// later natural death of a healthy child, each send once. Exits the runner
+// caused (the stop half of Stop or Restart) are swallowed at the source and
+// never appear here. The switch orchestrator is the sole consumer: while a
+// switch is in flight it owns these exits (converting them into the revert
+// path); when idle it forwards them outward as the app dying on its own.
+func (r *Runner) Exits() <-chan struct{} { return r.exits }
+
+// Alive reports whether the child process is currently running. The switch
+// orchestrator consults it right after the health probe, because a TCP probe
+// can pass against a stale listener left by an escaped daemon even though the
+// new child has already exited.
+func (r *Runner) Alive() bool {
 	r.mu.Lock()
-	if r.managedDepth > 0 {
-		r.managedDepth--
-	}
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	return r.state == StateRunning
 }
 
 // Signal delivers sig to the child's entire process group. Signaling a
@@ -195,7 +197,11 @@ func (r *Runner) Stop(ctx context.Context, sig os.Signal) error {
 		return nil
 	}
 	done := r.done
+	// Mark the coming exit as one the runner caused, so the wait goroutine
+	// swallows it instead of reporting it on Exits.
+	r.stopping = true
 	if err := r.signalGroupLocked(sig); err != nil {
+		r.stopping = false
 		r.mu.Unlock()
 		return err
 	}
@@ -221,11 +227,11 @@ func (r *Runner) Stop(ctx context.Context, sig os.Signal) error {
 // command and environment. A non-empty dir becomes the new working
 // directory — this is the hook the worktree switcher uses.
 func (r *Runner) Restart(ctx context.Context, dir string) error {
-	// The stop half of a restart is an expected, transient exit — never a
-	// terminal one. The managed window makes sure the wait goroutine does not
-	// close Terminated when the old child goes away.
-	r.BeginManaged()
-	defer r.EndManaged()
+	// The stop half of a restart is an expected, transient exit that Stop marks
+	// as runner-caused, so it is swallowed and never reported on Exits. The new
+	// child spawned below re-arms Exits: if it dies, that is reported normally,
+	// leaving the switch orchestrator (not the runner) to decide whether it was
+	// a switch failure or the app dying on its own.
 	if err := r.Stop(ctx, nil); err != nil {
 		return err
 	}

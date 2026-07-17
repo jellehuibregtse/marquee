@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
+	portpkg "github.com/jellehuibregtse/marquee/internal/port"
 	"github.com/jellehuibregtse/marquee/internal/proxy"
 	"github.com/jellehuibregtse/marquee/internal/runner"
 	"github.com/jellehuibregtse/marquee/internal/switcher"
@@ -231,6 +232,7 @@ func newIntHarnessHook(t *testing.T, switchHook string) *intHarness {
 		[]string{os.Args[0]},
 		[]string{"MARQUEE_TEST_CHILD=boot", "PORT=" + port, "CWD_LOG=" + cwdLog},
 		main,
+		nil,
 	)
 	if err := child.Start(); err != nil {
 		t.Fatalf("start child: %v", err)
@@ -244,7 +246,7 @@ func newIntHarnessHook(t *testing.T, switchHook string) *intHarness {
 	addr := "127.0.0.1:" + port
 	hctx, hcancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer hcancel()
-	if err := runner.WaitTCP(hctx, addr, 20*time.Millisecond); err != nil {
+	if err := portpkg.WaitTCP(hctx, addr, 20*time.Millisecond); err != nil {
 		t.Fatalf("initial child never became healthy: %v", err)
 	}
 
@@ -252,7 +254,7 @@ func newIntHarnessHook(t *testing.T, switchHook string) *intHarness {
 		Token:         testToken,
 		Runner:        child,
 		Collect:       gitinfo.Collect,
-		Health:        func(ctx context.Context) error { return runner.WaitTCP(ctx, addr, 20*time.Millisecond) },
+		Health:        func(ctx context.Context) error { return portpkg.WaitTCP(ctx, addr, 20*time.Millisecond) },
 		ChildAlive:    func() bool { return child.Status().State == runner.StateRunning },
 		Dir:           main,
 		Logger:        log.New(io.Discard, "", 0),
@@ -324,7 +326,7 @@ func (h *intHarness) assertChildHealthy(t *testing.T) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := runner.WaitTCP(ctx, "127.0.0.1:"+h.port, 20*time.Millisecond); err != nil {
+	if err := portpkg.WaitTCP(ctx, "127.0.0.1:"+h.port, 20*time.Millisecond); err != nil {
 		t.Fatalf("child is not healthy: %v", err)
 	}
 	if st := h.child.Status().State; st != runner.StateRunning {
@@ -626,10 +628,10 @@ func TestIntegrationRevertHookClearsStaleBlocker(t *testing.T) {
 // newDaemonHarness wires the real runner + switcher over a child that
 // daemonizes (MARQUEE_TEST_CHILD=daemon): its listener runs in a separate
 // session and survives the process-group stop, exactly like a tmux/overmind
-// server. The switch is wired as in production — ReclaimPortOnRestart to free
-// the internal port before the new child spawns, and ChildAlive to require a
-// live child. Cleanup reaps every escaped listener the run spawned, so no
-// detached port leaks across the suite.
+// server. The switch is wired as in production — a port.Reclaimer passed to the
+// runner frees the internal port before the new child spawns, and ChildAlive
+// requires a live child. Cleanup reaps every escaped listener the run spawned,
+// so no detached port leaks across the suite.
 func newDaemonHarness(t *testing.T) *intHarness {
 	t.Helper()
 	main := evalDir(t)
@@ -657,8 +659,8 @@ func newDaemonHarness(t *testing.T) *intHarness {
 		[]string{os.Args[0]},
 		[]string{"MARQUEE_TEST_CHILD=daemon", "PORT=" + port, "CWD_LOG=" + cwdLog, "DETACH_PID_LOG=" + pidLog},
 		main,
+		portpkg.Reclaimer{Port: portInt, Logf: func(string, ...any) {}},
 	)
-	child.ReclaimPortOnRestart(portInt, func(string, ...any) {})
 	if err := child.Start(); err != nil {
 		t.Fatalf("start child: %v", err)
 	}
@@ -672,7 +674,7 @@ func newDaemonHarness(t *testing.T) *intHarness {
 	addr := "127.0.0.1:" + port
 	hctx, hcancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer hcancel()
-	if err := runner.WaitTCP(hctx, addr, 20*time.Millisecond); err != nil {
+	if err := portpkg.WaitTCP(hctx, addr, 20*time.Millisecond); err != nil {
 		t.Fatalf("initial child never became healthy: %v", err)
 	}
 
@@ -680,7 +682,7 @@ func newDaemonHarness(t *testing.T) *intHarness {
 		Token:         testToken,
 		Runner:        child,
 		Collect:       gitinfo.Collect,
-		Health:        func(ctx context.Context) error { return runner.WaitTCP(ctx, addr, 20*time.Millisecond) },
+		Health:        func(ctx context.Context) error { return portpkg.WaitTCP(ctx, addr, 20*time.Millisecond) },
 		ChildAlive:    func() bool { return child.Status().State == runner.StateRunning },
 		Dir:           main,
 		Logger:        log.New(io.Discard, "", 0),

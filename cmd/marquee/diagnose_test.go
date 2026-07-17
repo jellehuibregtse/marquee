@@ -42,6 +42,33 @@ func TestListenErrorMessageNamesHolder(t *testing.T) {
 	}
 }
 
+// portHolder must resolve ports the way net.Listen does: --listen accepts
+// service names ("localhost:http"), so resolution goes through net.LookupPort
+// rather than digit parsing. Deterministic here: garbage and port 0 degrade to
+// ok=false, and a numeric port finds its holder.
+func TestPortHolderInputHandling(t *testing.T) {
+	if _, _, ok := portHolder("no-such-service-zzz"); ok {
+		t.Error("portHolder resolved a nonexistent service name")
+	}
+	if _, _, ok := portHolder("0"); ok {
+		t.Error("portHolder accepted port 0")
+	}
+
+	if _, lookErr := exec.LookPath("lsof"); lookErr != nil {
+		t.Skipf("lsof not available, PID naming degrades by design: %v", lookErr)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	portStr := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	pid, _, ok := portHolder(portStr)
+	if !ok || pid != os.Getpid() {
+		t.Errorf("portHolder(%q) = (%d, ok=%v), want our own PID %d", portStr, pid, ok, os.Getpid())
+	}
+}
+
 func TestListenErrorMessageWithoutHolderStillFriendly(t *testing.T) {
 	err := &net.OpError{Op: "listen", Err: errors.New("permission denied")}
 	msg := listenErrorMessage("127.0.0.1:80", err)

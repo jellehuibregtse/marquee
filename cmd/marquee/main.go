@@ -18,6 +18,7 @@ import (
 
 	"github.com/jellehuibregtse/marquee/internal/ghinfo"
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
+	"github.com/jellehuibregtse/marquee/internal/port"
 	"github.com/jellehuibregtse/marquee/internal/proxy"
 	"github.com/jellehuibregtse/marquee/internal/runner"
 	"github.com/jellehuibregtse/marquee/internal/status"
@@ -67,9 +68,9 @@ func run() int {
 		return 1
 	}
 
-	port := opts.internalPort
-	if port == 0 {
-		port, err = freePort()
+	internalPort := opts.internalPort
+	if internalPort == 0 {
+		internalPort, err = freePort()
 		if err != nil {
 			log.Error("could not pick a free internal port: %v", err)
 			return 1
@@ -90,17 +91,20 @@ func run() int {
 		warnStaleChild(pidPath, os.Stderr)
 	}
 
+	// On a restart (the switch path) the runner reclaims marquee's own internal
+	// port before spawning the new child, so an escaped remnant of the old child
+	// — a daemonizing process manager that survives the process-group stop —
+	// cannot keep the port and make the new child fail to bind (or a stale
+	// listener lie to the health probe). Scoped to this one loopback port; each
+	// reap is logged.
 	child := runner.New(opts.command, []string{
-		fmt.Sprintf("PORT=%d", port),
+		fmt.Sprintf("PORT=%d", internalPort),
 		"MARQUEE=1",
-		fmt.Sprintf("MARQUEE_PORT=%d", port),
-	}, "")
-	// On a restart (the switch path), reclaim marquee's own internal port before
-	// spawning the new child, so an escaped remnant of the old child — a
-	// daemonizing process manager that survives the process-group stop — cannot
-	// keep the port and make the new child fail to bind (or a stale listener lie
-	// to the health probe). Scoped to this one loopback port; each reap is logged.
-	child.ReclaimPortOnRestart(port, func(format string, args ...any) { log.Info(format, args...) })
+		fmt.Sprintf("MARQUEE_PORT=%d", internalPort),
+	}, "", port.Reclaimer{
+		Port: internalPort,
+		Logf: func(format string, args ...any) { log.Info(format, args...) },
+	})
 	if err := child.Start(); err != nil {
 		log.Error("could not start child: %v", err)
 		_ = ln.Close()
@@ -129,7 +133,7 @@ func run() int {
 		switchToken = ""
 	}
 
-	handler := proxy.New(proxy.Config{InternalPort: port, AllowHosts: opts.allowHosts, RelaxCSP: !opts.keepCSP, SwitchToken: switchToken})
+	handler := proxy.New(proxy.Config{InternalPort: internalPort, AllowHosts: opts.allowHosts, RelaxCSP: !opts.keepCSP, SwitchToken: switchToken})
 	status.Register(handler.Internal(), status.Deps{
 		Git:        git.Snapshot,
 		PR:         gh.PR,
@@ -140,13 +144,13 @@ func run() int {
 		Pills:      opts.pills,
 	})
 	if switchToken != "" {
-		healthAddr := fmt.Sprintf("127.0.0.1:%d", port)
+		healthAddr := fmt.Sprintf("127.0.0.1:%d", internalPort)
 		sw := switcher.New(switcher.Config{
 			Token:      switchToken,
 			Runner:     child,
 			Collect:    gitinfo.Collect,
 			Repoint:    func(dir string) { git.Repoint(dir); gh.Repoint(dir) },
-			Health:     func(ctx context.Context) error { return runner.WaitTCP(ctx, healthAddr, 0) },
+			Health:     func(ctx context.Context) error { return port.WaitTCP(ctx, healthAddr, 0) },
 			ChildAlive: func() bool { return child.Status().State == runner.StateRunning },
 			Dir:        workdir,
 			SwitchHook: opts.switchHook,
@@ -160,10 +164,10 @@ func run() int {
 	go func() { serveErr <- srv.Serve(ln) }()
 
 	log.Info("listening on http://%s, upstream 127.0.0.1:%d, child: %s",
-		ln.Addr(), port, strings.Join(opts.command, " "))
+		ln.Addr(), internalPort, strings.Join(opts.command, " "))
 
 	if !opts.noOpen {
-		go openWhenHealthy(child, fmt.Sprintf("127.0.0.1:%d", port), browserURL(opts.listen), log)
+		go openWhenHealthy(child, fmt.Sprintf("127.0.0.1:%d", internalPort), browserURL(opts.listen), log)
 	}
 
 	sigCh := make(chan os.Signal, 1)

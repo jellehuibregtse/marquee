@@ -417,8 +417,8 @@ func TestSwitchingSlugReportedWhileInProgress(t *testing.T) {
 	runner := &fakeRunner{block: make(chan struct{}), entered: make(chan struct{})}
 	h := newHarness(t, switcher.Config{Runner: runner})
 
-	if got := h.handler.SwitchingSlug(); got != "" {
-		t.Fatalf("SwitchingSlug = %q before any switch, want empty", got)
+	if got := h.handler.Progress().Slug; got != "" {
+		t.Fatalf("Progress slug = %q before any switch, want empty", got)
 	}
 	go func() { h.post(`{"slug":"feature"}`, sameOriginToken) }()
 	select {
@@ -426,18 +426,18 @@ func TestSwitchingSlugReportedWhileInProgress(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("switch never reached Restart")
 	}
-	if got := h.handler.SwitchingSlug(); got != "feature" {
-		t.Errorf("SwitchingSlug = %q during switch, want %q", got, "feature")
+	if got := h.handler.Progress().Slug; got != "feature" {
+		t.Errorf("Progress slug = %q during switch, want %q", got, "feature")
 	}
 	close(runner.block)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if h.handler.SwitchingSlug() == "" {
+		if h.handler.Progress().Slug == "" {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Errorf("SwitchingSlug = %q after switch, want empty", h.handler.SwitchingSlug())
+	t.Errorf("Progress slug = %q after switch, want empty", h.handler.Progress().Slug)
 }
 
 // --- happy path against a real temp git repo (fresh worktree-list validation) ---

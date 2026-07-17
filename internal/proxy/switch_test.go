@@ -8,7 +8,24 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/jellehuibregtse/marquee/internal/switching"
 )
+
+// fakeSwitchSource is a test SwitchSource whose reported slug can be swapped
+// atomically, standing in for the orchestrator's live Progress().
+type fakeSwitchSource struct{ slug atomic.Value }
+
+func (f *fakeSwitchSource) set(slug string) { f.slug.Store(slug) }
+
+func (f *fakeSwitchSource) Progress() switching.Progress {
+	slug, _ := f.slug.Load().(string)
+	phase := switching.Idle
+	if slug != "" {
+		phase = switching.Booting
+	}
+	return switching.Progress{Phase: phase, Slug: slug}
+}
 
 func TestBarSnippetForToken(t *testing.T) {
 	if got := barSnippetForToken(""); got != barSnippet {
@@ -83,9 +100,9 @@ func TestSwitchingPageServedWhileSwitching(t *testing.T) {
 	defer upstream.Close()
 
 	h := newHandler(t, upstreamPort(t, upstream), Config{})
-	var slug atomic.Value
-	slug.Store("")
-	h.SetSwitchingProbe(func() string { s, _ := slug.Load().(string); return s })
+	src := &fakeSwitchSource{}
+	src.set("")
+	h.SetSwitchSource(src)
 	proxySrv := httptest.NewServer(h)
 	defer proxySrv.Close()
 
@@ -113,7 +130,7 @@ func TestSwitchingPageServedWhileSwitching(t *testing.T) {
 	}
 
 	// Switching: HTML navigation gets the self-refreshing switching page.
-	slug.Store("lantern")
+	src.set("lantern")
 	resp, body := htmlGet()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("switching HTML: status = %d, want 503", resp.StatusCode)
@@ -148,7 +165,7 @@ func TestSwitchingPageServedWhileSwitching(t *testing.T) {
 	}
 
 	// Back to idle: proxying resumes.
-	slug.Store("")
+	src.set("")
 	if resp, body := htmlGet(); resp.StatusCode != http.StatusOK || !strings.Contains(body, "app content") {
 		t.Fatalf("after switch: status = %d body = %q, want 200 with app content", resp.StatusCode, body)
 	}

@@ -156,7 +156,7 @@ func run() int {
 			SwitchHook: opts.switchHook,
 		})
 		switcher.Register(handler.Internal(), sw)
-		handler.SetSwitchingProbe(sw.SwitchingSlug)
+		handler.SetSwitchSource(sw)
 	}
 
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}

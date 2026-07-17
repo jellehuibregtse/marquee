@@ -97,6 +97,11 @@ const CSS = `
   display: none !important;
 }
 .wrap {
+  position: relative;
+  /* The bar rides above the switch scrim (z-index 1 below) so it stays crisp and
+     legible in its corner while the rest of the page is dimmed — the bar is what
+     tells the user which worktree is active, so a switch must never bury it. */
+  z-index: 2;
   display: flex;
   align-items: center;
   gap: calc(6px * var(--mq-scale, 1));
@@ -349,13 +354,14 @@ a:focus-visible {
 /* The switch overlay is a viewport-filling scrim that covers the whole page
    while a worktree switch runs (hook, restart, health wait). It is a fixed
    child of the shadow root — not of the corner-anchored .wrap — so it spans the
-   viewport regardless of where the bar sits, and it rides the host's near-max
-   stacking context so it paints above all page content and swallows every click
-   until the switch resolves or fails. */
+   viewport regardless of where the bar sits, and it swallows every click until
+   the switch resolves or fails. Its z-index sits below .wrap (2) so the scrim
+   dims and blocks the page while the bar itself stays lifted above it, visible
+   and legible throughout the switch. */
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: 2147483647;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -387,9 +393,74 @@ a:focus-visible {
   border-top-color: #3b82f6;
   border-radius: 50%;
 }
+/* On readiness the spinner gives way to a settled check so the card reads as a
+   deliberate "done, reloading" beat instead of a spinner frozen mid-navigation.
+   The check is drawn with borders (no glyph) so it themes via color and never
+   risks emoji presentation. */
+.overlay-check {
+  flex: none;
+  position: relative;
+  width: calc(28px * var(--mq-scale, 1));
+  height: calc(28px * var(--mq-scale, 1));
+  border-radius: 50%;
+  background: #16a34a;
+}
+.overlay-check::after {
+  content: "";
+  position: absolute;
+  left: 36%;
+  top: 20%;
+  width: 22%;
+  height: 44%;
+  border: solid #fff;
+  border-width: 0 calc(2.5px * var(--mq-scale, 1)) calc(2.5px * var(--mq-scale, 1)) 0;
+  transform: rotate(45deg);
+}
+@media (prefers-color-scheme: dark) {
+  .overlay-check {
+    background: #22c55e;
+  }
+}
 @media (prefers-reduced-motion: no-preference) {
   .overlay-spinner {
     animation: marquee-spin 0.7s linear infinite;
+  }
+  .overlay {
+    animation: marquee-overlay-in 0.2s ease both;
+  }
+  .overlay-card {
+    animation: marquee-card-in 0.2s ease both;
+  }
+  .overlay-check {
+    animation: marquee-pop 0.25s ease both;
+  }
+}
+@keyframes marquee-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes marquee-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(4px * var(--mq-scale, 1))) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes marquee-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: none;
   }
 }
 .overlay-text {
@@ -428,6 +499,7 @@ const TEMPLATE = `
 <div class="overlay" role="alert" aria-live="assertive" hidden>
   <div class="overlay-card">
     <span class="overlay-spinner" aria-hidden="true"></span>
+    <span class="overlay-check" aria-hidden="true" hidden></span>
     <span class="overlay-text"></span>
   </div>
 </div>
@@ -518,6 +590,8 @@ class MarqueeBar extends HTMLElement {
   #gear;
   #settingsMenu;
   #overlay;
+  #overlaySpinner;
+  #overlayCheck;
   #overlayText;
   #settings;
   #storedPrefs = {};
@@ -553,6 +627,8 @@ class MarqueeBar extends HTMLElement {
     this.#gear = this.shadowRoot.querySelector(".gear");
     this.#settingsMenu = this.shadowRoot.querySelector(".settings-menu");
     this.#overlay = this.shadowRoot.querySelector(".overlay");
+    this.#overlaySpinner = this.shadowRoot.querySelector(".overlay-spinner");
+    this.#overlayCheck = this.shadowRoot.querySelector(".overlay-check");
     this.#overlayText = this.shadowRoot.querySelector(".overlay-text");
     this.#storedPrefs = load(localStore());
     this.#settings = createSettingsPanel({
@@ -929,7 +1005,7 @@ class MarqueeBar extends HTMLElement {
         // server instead of hanging while it boots. The overlay stays up across
         // the reload's unload; return before the finally so nothing repaints.
         if (await this.#waitForWorktreeReady(slug)) {
-          this.#setOverlayText("Ready — reloading…");
+          this.#markOverlayReady();
           location.reload();
           return;
         }
@@ -1015,8 +1091,22 @@ class MarqueeBar extends HTMLElement {
   }
 
   #showOverlay(label) {
+    // A fresh switch always opens in the busy state: spinner up, check down, so
+    // a card reused after an earlier ready→reload beat never flashes stale.
+    this.#overlaySpinner.hidden = false;
+    this.#overlayCheck.hidden = true;
     this.#setOverlayText(`Switching to ${label}…`);
     this.#overlay.hidden = false;
+  }
+
+  // #markOverlayReady settles the card the instant readiness is confirmed and
+  // the reload is fired: the spinner gives way to a check and the copy reads
+  // "Ready — reloading…", so the last frame before navigation is a deliberate
+  // done state rather than a spinner stuck mid-reload.
+  #markOverlayReady() {
+    this.#overlaySpinner.hidden = true;
+    this.#overlayCheck.hidden = false;
+    this.#setOverlayText("Ready — reloading…");
   }
 
   #setOverlayText(text) {

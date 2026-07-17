@@ -147,8 +147,14 @@ type marqueeProc struct {
 }
 
 // startMarquee launches the real marquee binary wrapping testupstream,
-// with cwd inside the fixture repo. upstreamArgs are passed to the child.
+// with cwd inside the shared fixture repo. upstreamArgs are passed to the child.
 func startMarquee(upstreamArgs ...string) (*marqueeProc, error) {
+	return startMarqueeAt(repoDir, upstreamArgs...)
+}
+
+// startMarqueeAt is startMarquee with an explicit cwd, so the switch test can
+// run marquee inside a repo it built with a second worktree to switch into.
+func startMarqueeAt(repo string, upstreamArgs ...string) (*marqueeProc, error) {
 	listenPort, err := freePort()
 	if err != nil {
 		return nil, err
@@ -161,10 +167,11 @@ func startMarquee(upstreamArgs ...string) (*marqueeProc, error) {
 	args := append([]string{
 		"--listen", addr,
 		"--internal-port", strconv.Itoa(internalPort),
+		"--no-open",
 		"--", upstreamBin,
 	}, upstreamArgs...)
 	cmd := exec.Command(marqueeBin, args...)
-	cmd.Dir = repoDir
+	cmd.Dir = repo
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

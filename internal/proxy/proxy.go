@@ -181,8 +181,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serveStarting(w, r)
 		return
 	}
-	h.reverse.ServeHTTP(w, r)
+	h.reverse.ServeHTTP(sniffGuard{w}, r)
 }
+
+// sniffGuard keeps the proxy transparent when the upstream sent no
+// Content-Type: net/http sniffs one from the body prefix if the header is
+// still unset when headers hit the wire, and with FlushInterval -1 whether
+// that happens races the initial flush timer against the first body write.
+// Setting the key to an explicit nil is net/http's documented way to
+// suppress sniffing without emitting a header. ResponseController reaches
+// Flush and Hijack on the wrapped writer through Unwrap, so streaming and
+// protocol upgrades are unaffected.
+type sniffGuard struct {
+	http.ResponseWriter
+}
+
+func (w sniffGuard) WriteHeader(status int) {
+	if _, ok := w.Header()["Content-Type"]; !ok {
+		w.Header()["Content-Type"] = nil
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w sniffGuard) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func isInternalPath(path string) bool {
 	return path == internalPrefix[:len(internalPrefix)-1] || strings.HasPrefix(path, internalPrefix)

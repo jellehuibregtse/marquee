@@ -32,14 +32,13 @@ The binary makes no network calls except to the upstream and (optionally, operat
 
 ## Install
 
-The intended install story is Homebrew:
+Install with Homebrew:
 
 ```sh
-# Not yet released — this tap does not exist yet.
 brew install jellehuibregtse/tap/marquee
 ```
 
-Until then, build from source (works today):
+Or build from source:
 
 ```sh
 git clone https://github.com/jellehuibregtse/marquee

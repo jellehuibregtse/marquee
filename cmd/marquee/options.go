@@ -10,79 +10,30 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/jellehuibregtse/marquee/internal/knob"
 )
 
 // errUsage signals a usage problem whose message parseArgs has already
 // written; run turns it into exit code 2 without printing anything more.
 var errUsage = errors.New("usage error")
 
-// positionUsage documents the four corners --position accepts; validPosition
-// enforces them and validPositions renders them for the error message.
+// The usage strings stay as prose; the accepted values and their validation
+// come from the knob catalog (knob.Default), the single owner of every knob's
+// value set, so a flag can never accept an id the bar has no rendering for.
 const positionUsage = "where the bar renders: bottom-left, bottom-right, top-left, or top-right"
 
-func validPosition(p string) bool {
-	switch p {
-	case "bottom-left", "bottom-right", "top-left", "top-right":
-		return true
-	default:
-		return false
-	}
-}
-
-const validPositions = "bottom-left, bottom-right, top-left, top-right"
-
-// sizeUsage documents the size presets --size accepts; validSize enforces them
-// and validSizes renders them for the error message.
 const sizeUsage = "how large the bar renders: small, medium, or large"
 
-func validSize(s string) bool {
-	switch s {
-	case "small", "medium", "large":
-		return true
-	default:
-		return false
-	}
-}
-
-const validSizes = "small, medium, large"
-
-// themeUsage documents the curated themes --theme accepts; validTheme enforces
-// them and validThemes renders them for the error message. The names mirror the
-// bar's THEMES table; "default" reproduces the original light/dark look.
 const themeUsage = "the bar's color theme: default, midnight, sand, or forest"
 
-func validTheme(t string) bool {
-	switch t {
-	case "default", "midnight", "sand", "forest":
-		return true
-	default:
-		return false
-	}
-}
-
-const validThemes = "default, midnight, sand, forest"
-
-// pillsUsage documents the --pills list; validPill enforces each id and
-// validPills renders the four ids for the error message. The list order is the
-// render order, an omitted id is hidden, and an empty value hides all pills.
+// pillsUsage documents the --pills list. The list order is the render order, an
+// omitted id is hidden, and an empty value hides all pills.
 const pillsUsage = "which info pills to show, comma-separated over branch,dirty,worktree,pr (list order = render order; omit an id to hide it; empty hides all)"
-
-const defaultPills = "branch,dirty,worktree,pr"
-
-func validPill(p string) bool {
-	switch p {
-	case "branch", "dirty", "worktree", "pr":
-		return true
-	default:
-		return false
-	}
-}
-
-const validPills = "branch, dirty, worktree, pr"
 
 // parsePills turns the --pills CSV into an ordered slice. An empty value is
 // valid and yields no pills (all hidden). An unknown id or a duplicate is a
-// usage error whose message lists the four valid ids.
+// usage error whose message lists the valid ids from the catalog.
 func parsePills(raw string) ([]string, error) {
 	if raw == "" {
 		return []string{}, nil
@@ -92,11 +43,11 @@ func parsePills(raw string) ([]string, error) {
 	seen := make(map[string]bool, len(parts))
 	for _, part := range parts {
 		id := strings.TrimSpace(part)
-		if !validPill(id) {
-			return nil, fmt.Errorf("invalid --pills %q: unknown pill %q: must be one of %s", raw, id, validPills)
+		if !knob.Default.Pills.Valid(id) {
+			return nil, fmt.Errorf("invalid --pills %q: unknown pill %q: must be one of %s", raw, id, knob.Default.Pills.List())
 		}
 		if seen[id] {
-			return nil, fmt.Errorf("invalid --pills %q: duplicate pill %q; each of %s may appear at most once", raw, id, validPills)
+			return nil, fmt.Errorf("invalid --pills %q: duplicate pill %q; each of %s may appear at most once", raw, id, knob.Default.Pills.List())
 		}
 		seen[id] = true
 		pills = append(pills, id)
@@ -138,11 +89,11 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	opts := &options{}
 	fs.StringVar(&opts.listen, "listen", "127.0.0.1:3000", "address to listen on (loopback only unless --unsafe-listen)")
 	fs.IntVar(&opts.internalPort, "internal-port", 0, "port the child binds to (0 picks a free port)")
-	fs.StringVar(&opts.position, "position", "bottom-left", positionUsage)
-	fs.StringVar(&opts.size, "size", "medium", sizeUsage)
-	fs.StringVar(&opts.theme, "theme", "default", themeUsage)
+	fs.StringVar(&opts.position, "position", knob.Default.Positions.Default, positionUsage)
+	fs.StringVar(&opts.size, "size", knob.Default.Sizes.Default, sizeUsage)
+	fs.StringVar(&opts.theme, "theme", knob.Default.Themes.Default, themeUsage)
 	var pillsRaw string
-	fs.StringVar(&pillsRaw, "pills", defaultPills, pillsUsage)
+	fs.StringVar(&pillsRaw, "pills", knob.Default.Pills.Default, pillsUsage)
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the app is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -160,16 +111,16 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	}
 	opts.command = fs.Args()
 
-	if !validPosition(opts.position) {
-		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be one of %s\n", opts.position, validPositions)
+	if !knob.Default.Positions.Valid(opts.position) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be one of %s\n", opts.position, knob.Default.Positions.List())
 		return nil, errUsage
 	}
-	if !validSize(opts.size) {
-		_, _ = fmt.Fprintf(out, "marquee: invalid --size %q: must be one of %s\n", opts.size, validSizes)
+	if !knob.Default.Sizes.Valid(opts.size) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --size %q: must be one of %s\n", opts.size, knob.Default.Sizes.List())
 		return nil, errUsage
 	}
-	if !validTheme(opts.theme) {
-		_, _ = fmt.Fprintf(out, "marquee: invalid --theme %q: must be one of %s\n", opts.theme, validThemes)
+	if !knob.Default.Themes.Valid(opts.theme) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --theme %q: must be one of %s\n", opts.theme, knob.Default.Themes.List())
 		return nil, errUsage
 	}
 	pills, err := parsePills(pillsRaw)
@@ -209,11 +160,11 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 	opts := &attachOptions{}
 	fs.StringVar(&opts.listen, "listen", "127.0.0.1:3000", "address to listen on (loopback only unless --unsafe-listen)")
 	fs.StringVar(&opts.upstream, "upstream", "", "upstream URL to proxy to, e.g. http://localhost:3100 (required, loopback only unless --unsafe-listen)")
-	fs.StringVar(&opts.position, "position", "bottom-left", positionUsage)
-	fs.StringVar(&opts.size, "size", "medium", sizeUsage)
-	fs.StringVar(&opts.theme, "theme", "default", themeUsage)
+	fs.StringVar(&opts.position, "position", knob.Default.Positions.Default, positionUsage)
+	fs.StringVar(&opts.size, "size", knob.Default.Sizes.Default, sizeUsage)
+	fs.StringVar(&opts.theme, "theme", knob.Default.Themes.Default, themeUsage)
 	var pillsRaw string
-	fs.StringVar(&pillsRaw, "pills", defaultPills, pillsUsage)
+	fs.StringVar(&pillsRaw, "pills", knob.Default.Pills.Default, pillsUsage)
 	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the upstream is healthy")
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -230,16 +181,16 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 		_, _ = fmt.Fprintf(out, "marquee: attach takes no positional arguments (got %v); did you mean --upstream?\n", positional)
 		return nil, errUsage
 	}
-	if !validPosition(opts.position) {
-		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be one of %s\n", opts.position, validPositions)
+	if !knob.Default.Positions.Valid(opts.position) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be one of %s\n", opts.position, knob.Default.Positions.List())
 		return nil, errUsage
 	}
-	if !validSize(opts.size) {
-		_, _ = fmt.Fprintf(out, "marquee: invalid --size %q: must be one of %s\n", opts.size, validSizes)
+	if !knob.Default.Sizes.Valid(opts.size) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --size %q: must be one of %s\n", opts.size, knob.Default.Sizes.List())
 		return nil, errUsage
 	}
-	if !validTheme(opts.theme) {
-		_, _ = fmt.Fprintf(out, "marquee: invalid --theme %q: must be one of %s\n", opts.theme, validThemes)
+	if !knob.Default.Themes.Valid(opts.theme) {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --theme %q: must be one of %s\n", opts.theme, knob.Default.Themes.List())
 		return nil, errUsage
 	}
 	pills, err := parsePills(pillsRaw)

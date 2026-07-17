@@ -124,7 +124,7 @@ func TestStatusJSONShape(t *testing.T) {
 	}
 
 	doc := assertKeys(t, "status", rec.Body.Bytes(),
-		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size", "theme", "pills")
+		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size", "theme", "pills", "catalog")
 	assertKeys(t, "worktree", doc["worktree"], "path", "slug", "isMain")
 	assertKeys(t, "child", doc["child"], "state")
 
@@ -167,6 +167,58 @@ func TestStatusJSONShape(t *testing.T) {
 	assertKeys(t, "worktrees[0]", worktrees[0], "slug", "path", "branch")
 }
 
+func TestStatusCarriesKnobCatalog(t *testing.T) {
+	deps, _ := fixtureDeps(t, func() *ghinfo.PR { return nil })
+	mux := newMux(t, deps)
+
+	rec := get(mux, "http://localhost/__marquee/status")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	cat := assertKeys(t, "catalog", doc["catalog"], "positions", "sizes", "themes", "pills")
+
+	// Every knob rides the payload with its default and ordered choices, so the
+	// bar derives its value lists and labels from the same table the CLI
+	// validated against.
+	assertKeys(t, "catalog.positions", cat["positions"], "default", "choices")
+
+	// The theme knob additionally carries per-theme palettes: the default theme
+	// is scheme-aware (light + dark) while the curated themes are fixed (light
+	// only), so bar.js can build each theme's CSS custom properties from data.
+	var themes struct {
+		Choices []struct {
+			ID    string          `json:"id"`
+			Light json.RawMessage `json:"light"`
+			Dark  json.RawMessage `json:"dark"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(cat["themes"], &themes); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]bool{}
+	for _, th := range themes.Choices {
+		byID[th.ID] = true
+		if th.Light == nil {
+			t.Errorf("theme %q missing light palette", th.ID)
+		}
+		if th.ID == "default" && th.Dark == nil {
+			t.Errorf("default theme must carry a dark palette (scheme-aware)")
+		}
+		if th.ID != "default" && th.Dark != nil {
+			t.Errorf("curated theme %q must be fixed (no dark palette)", th.ID)
+		}
+	}
+	for _, want := range []string{"default", "midnight", "sand", "forest"} {
+		if !byID[want] {
+			t.Errorf("catalog themes missing %q", want)
+		}
+	}
+}
+
 func TestStatusIncludesPR(t *testing.T) {
 	pr := &ghinfo.PR{Number: 12, Title: "Add lantern", URL: "https://example.com/pull/12"}
 	deps, _ := fixtureDeps(t, func() *ghinfo.PR { return pr })
@@ -177,7 +229,7 @@ func TestStatusIncludesPR(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	doc := assertKeys(t, "status", rec.Body.Bytes(),
-		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size", "theme", "pills")
+		"branch", "dirty", "worktree", "repoRoot", "pr", "worktrees", "child", "position", "size", "theme", "pills", "catalog")
 	assertKeys(t, "pr", doc["pr"], "number", "title", "url")
 	var got ghinfo.PR
 	if err := json.Unmarshal(doc["pr"], &got); err != nil || got != *pr {

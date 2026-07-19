@@ -117,6 +117,30 @@ func TestBarScriptEmbedded(t *testing.T) {
 		"worktree.branch",
 		"item-branch",
 		"item-slug",
+		// Switcher search (switcher-search): a filter input pinned at the top
+		// of the menu (focused on open), a pure module-level fuzzy-subsequence
+		// scorer that ranks branch and slug with consecutive-run and
+		// word-boundary bonuses, matched characters bolded via per-character
+		// spans assigned through textContent, and a non-interactive empty row
+		// when nothing matches. The query resets when the menu closes. The
+		// role="menu" lives on the results list, not the popover wrapper, so
+		// the search input never sits inside an ARIA menu; the empty row is a
+		// disabled menuitem.
+		"menu-search",
+		"menu-list",
+		`class="menu-list" role="menu"`,
+		"fuzzyScore",
+		"highlightedSpan",
+		"No matches",
+		"aria-disabled",
+		// Switcher search keyboard flow: ArrowDown moves from the input into
+		// the first result, ArrowUp from the first result returns to the
+		// input, and Enter in the input activates the top result through the
+		// same click path as the pointer.
+		`"ArrowDown"`,
+		`"ArrowUp"`,
+		"#menuSearch.focus()",
+		"items[0].click()",
 		// PR-chip layout shift (PR 1): the slot reserves a fixed width and
 		// renders a reduced-motion-aware shimmer skeleton while the PR is still
 		// unknown, so the switcher/toggle don't shift when the async poll

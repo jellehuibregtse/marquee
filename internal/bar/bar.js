@@ -257,8 +257,6 @@ a:focus-visible {
   bottom: calc(100% + 6px);
   top: auto;
   min-width: calc(160px * var(--mq-scale, 1));
-  max-height: 240px;
-  overflow-y: auto;
   padding: calc(4px * var(--mq-scale, 1));
   margin: 0;
   border-radius: calc(8px * var(--mq-scale, 1));
@@ -274,6 +272,34 @@ a:focus-visible {
 :host([data-position^="top-"]) .menu {
   bottom: auto;
   top: calc(100% + 6px);
+}
+.menu-search {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 calc(4px * var(--mq-scale, 1));
+  padding: 4px 8px;
+  border: 1px solid var(--mq-border);
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.menu-search:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: -2px;
+}
+.menu-list {
+  max-height: 240px;
+  overflow-y: auto;
+}
+.menu-empty {
+  padding: 5px 8px;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+.match {
+  font-weight: 700;
 }
 .menu button {
   display: flex;
@@ -474,7 +500,10 @@ const TEMPLATE = `
         <span class="switch-label"></span>
         <span class="switch-caret" aria-hidden="true">▾︎</span>
       </button>
-      <div class="menu" role="menu" aria-label="Worktrees" hidden></div>
+      <div class="menu" hidden>
+        <input class="menu-search" type="text" placeholder="Search worktrees" aria-label="Search worktrees" autocomplete="off" spellcheck="false" />
+        <div class="menu-list" role="menu" aria-label="Worktrees"></div>
+      </div>
     </span>
   </div>
   <span class="settings">
@@ -581,6 +610,47 @@ function textSpan(text) {
   return span;
 }
 
+// fuzzyScore rates query against candidate as a case-insensitive subsequence,
+// matched greedily left to right. A non-match returns null; a match returns
+// the matched character positions for highlighting plus a score where
+// consecutive runs and word boundaries (start of string, or after "/", "-",
+// "_") earn bonuses, with an earlier first match as the fractional tiebreak.
+function fuzzyScore(query, candidate) {
+  const q = query.toLowerCase();
+  const c = candidate.toLowerCase();
+  const positions = [];
+  let score = 0;
+  let from = 0;
+  for (const char of q) {
+    const at = c.indexOf(char, from);
+    if (at === -1) return null;
+    if (positions.length > 0 && at === positions[positions.length - 1] + 1) score += 2;
+    if (at === 0 || "/-_".includes(c[at - 1])) score += 3;
+    score += 1;
+    positions.push(at);
+    from = at + 1;
+  }
+  return { score: score - positions[0] / (c.length + 1), positions };
+}
+
+// highlightedSpan renders text with the characters at the given positions
+// bolded, composing per-character spans assigned via textContent only.
+function highlightedSpan(className, text, positions) {
+  const container = document.createElement("span");
+  container.className = className;
+  if (positions.length === 0) {
+    container.textContent = text;
+    return container;
+  }
+  const matched = new Set(positions);
+  for (let i = 0; i < text.length; i++) {
+    const span = textSpan(text[i]);
+    if (matched.has(i)) span.className = "match";
+    container.appendChild(span);
+  }
+  return container;
+}
+
 function safeHttpUrl(value) {
   try {
     const url = new URL(value, location.href);
@@ -614,6 +684,8 @@ class MarqueeBar extends HTMLElement {
   #switch;
   #switchLabel;
   #menu;
+  #menuSearch;
+  #menuList;
   #gear;
   #settingsMenu;
   #overlay;
@@ -633,6 +705,7 @@ class MarqueeBar extends HTMLElement {
   #switching = false;
   #switchError = "";
   #menuOpen = false;
+  #searchQuery = "";
   #dark = window.matchMedia("(prefers-color-scheme: dark)");
   #onSchemeChange = () => this.#render();
   #onDocPointerDown = (event) => this.#onOutsidePointer(event);
@@ -653,6 +726,8 @@ class MarqueeBar extends HTMLElement {
     this.#switch = this.shadowRoot.querySelector(".switch");
     this.#switchLabel = this.shadowRoot.querySelector(".switch-label");
     this.#menu = this.shadowRoot.querySelector(".menu");
+    this.#menuSearch = this.shadowRoot.querySelector(".menu-search");
+    this.#menuList = this.shadowRoot.querySelector(".menu-list");
     this.#gear = this.shadowRoot.querySelector(".gear");
     this.#settingsMenu = this.shadowRoot.querySelector(".settings-menu");
     this.#overlay = this.shadowRoot.querySelector(".overlay");
@@ -676,6 +751,10 @@ class MarqueeBar extends HTMLElement {
     this.#toggle.addEventListener("click", () => this.#onToggle());
     this.#switch.addEventListener("click", () => this.#toggleMenu());
     this.#menu.addEventListener("keydown", (event) => this.#onMenuKeydown(event));
+    this.#menuSearch.addEventListener("input", () => {
+      this.#searchQuery = this.#menuSearch.value;
+      this.#rebuildMenu();
+    });
     this.#switch.addEventListener("keydown", (event) => this.#onTriggerKeydown(event));
     // The token is delivered only through the injected element attribute on a
     // same-origin page; it is never read from any network response.
@@ -927,28 +1006,58 @@ class MarqueeBar extends HTMLElement {
     return span;
   }
 
+  #rebuildMenu() {
+    const status = this.#status || {};
+    const worktrees = Array.isArray(status.worktrees) ? status.worktrees : [];
+    this.#buildMenu(worktrees, status.worktree);
+  }
+
+  // #buildMenu renders the worktree list into the menu, filtered and ranked by
+  // the search query when one is set. An empty query keeps git order; a
+  // non-empty query keeps only fuzzy matches, best score first (the stable
+  // sort preserves git order between equal scores).
   #buildMenu(worktrees, current) {
     const currentSlug = current && current.slug ? current.slug : "";
-    const items = worktrees.map((worktree) => {
+    const query = this.#searchQuery.trim();
+    const entries = [];
+    for (const worktree of worktrees) {
+      const slug = String(worktree.slug || "");
+      const branch = String(worktree.branch || "");
+      let branchMatch = null;
+      let slugMatch = null;
+      if (query !== "") {
+        branchMatch = branch === "" ? null : fuzzyScore(query, branch);
+        slugMatch = slug === "" ? null : fuzzyScore(query, slug);
+        if (!branchMatch && !slugMatch) continue;
+      }
+      const score = Math.max(branchMatch ? branchMatch.score : -Infinity, slugMatch ? slugMatch.score : -Infinity);
+      entries.push({ slug, branch, branchMatch, slugMatch, score });
+    }
+    if (query !== "") entries.sort((a, b) => b.score - a.score);
+    if (entries.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "menu-empty";
+      empty.setAttribute("role", "menuitem");
+      empty.setAttribute("aria-disabled", "true");
+      empty.textContent = "No matches";
+      this.#menuList.replaceChildren(empty);
+      return;
+    }
+    const items = entries.map(({ slug, branch, branchMatch, slugMatch }) => {
       const item = document.createElement("button");
       item.type = "button";
       item.setAttribute("role", "menuitem");
-      const slug = String(worktree.slug || "");
-      const branch = String(worktree.branch || "");
       item.dataset.slug = slug;
       const isCurrent = slug === currentSlug;
       if (isCurrent) item.setAttribute("aria-current", "true");
       const text = document.createElement("span");
       text.className = "item-text";
-      const primary = document.createElement("span");
-      primary.className = "item-branch";
-      primary.textContent = (branch || slug) + (isCurrent ? " (current)" : "");
+      const primaryMatch = branch !== "" ? branchMatch : slugMatch;
+      const primary = highlightedSpan("item-branch", branch || slug, primaryMatch ? primaryMatch.positions : []);
+      if (isCurrent) primary.appendChild(textSpan(" (current)"));
       text.appendChild(primary);
       if (branch && branch !== slug) {
-        const secondary = document.createElement("span");
-        secondary.className = "item-slug";
-        secondary.textContent = slug;
-        text.appendChild(secondary);
+        text.appendChild(highlightedSpan("item-slug", slug, slugMatch ? slugMatch.positions : []));
       }
       item.replaceChildren(text);
       const description = branch ? `Branch ${branch}, worktree ${slug}` : `Worktree ${slug}`;
@@ -959,7 +1068,7 @@ class MarqueeBar extends HTMLElement {
       });
       return item;
     });
-    this.#menu.replaceChildren(...items);
+    this.#menuList.replaceChildren(...items);
   }
 
   #toggleMenu() {
@@ -975,8 +1084,7 @@ class MarqueeBar extends HTMLElement {
     this.#menuOpen = true;
     this.#menu.hidden = false;
     this.#switch.setAttribute("aria-expanded", "true");
-    const first = this.#menu.querySelector("button");
-    if (first) first.focus();
+    this.#menuSearch.focus();
   }
 
   #closeMenu(returnFocus) {
@@ -987,6 +1095,13 @@ class MarqueeBar extends HTMLElement {
     this.#menuOpen = false;
     this.#menu.hidden = true;
     this.#switch.setAttribute("aria-expanded", "false");
+    // The query dies with the menu, so every open starts fresh with the full
+    // list instead of a stale filter.
+    if (this.#searchQuery !== "") {
+      this.#searchQuery = "";
+      this.#menuSearch.value = "";
+      this.#rebuildMenu();
+    }
     if (returnFocus) this.#switch.focus();
   }
 
@@ -997,20 +1112,37 @@ class MarqueeBar extends HTMLElement {
     }
   }
 
+  // #onMenuKeydown wires the input and the result list into one keyboard
+  // flow: ArrowDown from the input enters the first result, ArrowUp from the
+  // first result returns to the input, Enter in the input activates the top
+  // result through the same click path as the pointer, Escape closes.
   #onMenuKeydown(event) {
-    const items = Array.from(this.#menu.querySelectorAll("button"));
-    const index = items.indexOf(this.shadowRoot.activeElement);
+    const active = this.shadowRoot.activeElement;
+    const items = Array.from(this.#menuList.querySelectorAll("button"));
     if (event.key === "Escape") {
       event.preventDefault();
       this.#closeMenu(true);
-    } else if (event.key === "ArrowDown") {
+      return;
+    }
+    if (active === this.#menuSearch) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        if (items[0]) items[0].focus();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        if (items[0]) items[0].click();
+      }
+      return;
+    }
+    const index = items.indexOf(active);
+    if (event.key === "ArrowDown") {
       event.preventDefault();
       const next = items[Math.min(index + 1, items.length - 1)];
       if (next) next.focus();
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       if (index <= 0) {
-        this.#closeMenu(true);
+        this.#menuSearch.focus();
       } else {
         items[index - 1].focus();
       }

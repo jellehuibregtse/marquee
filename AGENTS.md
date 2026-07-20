@@ -9,6 +9,21 @@
 - **IP hygiene: nothing from the owner's employer enters this repo.** No employer HTML in `testdata/`, no internal hostnames, code, screenshots, or issue references anywhere — fixtures are synthetic, the README demo targets a public sample app. If a task seems to need real-app material, stop and ask.
 - One task = one atomic commit/PR. If a task hides two concerns, split it.
 
+## Releasing
+
+The publication gate above stays in force: every step below requires a direct human instruction in the current session.
+
+- There is no release-please, no release PR, and no committed CHANGELOG. A release is cut by pushing an annotated tag to `main`; `.github/workflows/release.yml` triggers on `v*` tags and runs goreleaser, which builds the binaries, publishes the GitHub release (notes grouped from conventional commits by `.goreleaser.yaml`), and pushes the cask to the `jellehuibregtse/homebrew-tap` repo.
+- Pick the version from the conventional commits since the last tag: any `feat` bumps minor, otherwise `fix` bumps patch (breaking changes would bump major).
+- Tag the `main` commit to release, with the tag message being the version string (matching `v1.0.1`/`v1.1.0`):
+
+  ```sh
+  git tag -a v1.2.0 -m "v1.2.0"
+  git push origin v1.2.0
+  ```
+
+- That push is the whole release; verify the Release workflow run and the resulting GitHub release afterwards.
+
 ## Codebase map
 
 Where things live, so a task starts from the right file instead of a re-exploration.

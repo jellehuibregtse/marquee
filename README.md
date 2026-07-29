@@ -75,12 +75,40 @@ Everything after `--` is your command, run verbatim.
 | `--no-open` | off | Don't open the browser on startup. |
 | `--quiet` | off | Suppress marquee's own log lines. |
 | `--allow-host` | — | Add a hostname to the internal-endpoint allowlist (repeatable). |
-| `--switch-hook` | — | Command run in the target worktree before switching to it, e.g. `"bundle install"`. Bootstraps a fresh worktree; a failing hook reverts the switch. |
+| `--switch-hook` | — | Command run in a worktree before the child starts there, e.g. `"bundle install"`, including the worktree marquee itself is launched in. Bootstraps a fresh worktree; see [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |
 | `--unsafe-listen` | off | Allow a non-loopback `--listen` address. Prints a persistent warning; exposes your dev app to the network. |
 
 ### Customizing the bar
 
 `--position`, `--size`, `--theme`, and `--pills` set the starting defaults. You can also change all four live from the **⚙ settings panel** in the bar itself — click the gear, pick a corner/size/theme, or toggle and reorder pills. Panel choices are saved in the browser per app and win over the flags on the next load; **Reset** returns everything to the flag defaults.
+
+### Bootstrapping a worktree (`--switch-hook`)
+
+A fresh git worktree is usually not ready to run: dependencies are missing, there is no local env file, the database it wants doesn't exist yet. `--switch-hook` is the command that makes a worktree runnable, and marquee runs it in a worktree **before it starts your dev command there**:
+
+```sh
+marquee --switch-hook "bin/setup" -- bin/dev
+```
+
+That covers every start, including the very first one:
+
+- **on startup**, in the worktree you launched marquee in;
+- **on a switch**, in the worktree you are switching to;
+- **on a revert**, in the worktree marquee is falling back to after a failed switch (a cleanup step like `rm -f .overmind.sock` is what lets a process manager boot there again).
+
+Running it on startup is the point: the worktree you happen to launch in is a worktree like any other, and if it were the one marquee never bootstrapped, it would be the one silently running against whatever a half-configured environment points at.
+
+The hook runs through `sh -c` with its working directory set to the worktree, so pipelines and `&&` chains work. **Write it to be idempotent**: the revert leg re-runs it in a worktree that was already working, and every restart runs it again.
+
+A failing hook (non-zero exit or a 5-minute timeout) never leaves you with a half-switched app:
+
+- **at startup** marquee refuses to start your dev command and exits non-zero;
+- **on a switch** the hook runs before the current child is stopped, so a failure fails the switch and leaves your running app untouched;
+- **on a revert** the failure is logged and the restart is attempted anyway, since that worktree booted once already.
+
+The hook's output is streamed as it runs, which `--quiet` suppresses along with marquee's other progress lines. The last lines of a *failing* hook are printed again as an error, so `--quiet` never hides why a bootstrap failed.
+
+While the hook runs at startup, marquee is already serving: a browser that arrives mid-bootstrap gets the same self-refreshing "app is starting" page it gets while your dev server boots. Ctrl-C during a bootstrap stops the hook and its child processes.
 
 ### Attach mode
 

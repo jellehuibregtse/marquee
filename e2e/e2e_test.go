@@ -144,6 +144,9 @@ type marqueeProc struct {
 	addr         string
 	baseURL      string
 	internalPort int
+	// output holds everything marquee wrote, so a test can assert on the message
+	// it printed. Read it only after the process has exited.
+	output *bytes.Buffer
 }
 
 // startMarquee launches the real marquee binary wrapping testupstream,
@@ -155,6 +158,13 @@ func startMarquee(upstreamArgs ...string) (*marqueeProc, error) {
 // startMarqueeAt is startMarquee with an explicit cwd, so the switch test can
 // run marquee inside a repo it built with a second worktree to switch into.
 func startMarqueeAt(repo string, upstreamArgs ...string) (*marqueeProc, error) {
+	return startMarqueeWith(repo, nil, append([]string{upstreamBin}, upstreamArgs...))
+}
+
+// startMarqueeWith is the general launcher: extra marquee flags and the child
+// argv of the caller's choosing, so a test can exercise a flag (--switch-hook)
+// and make the child itself depend on what that flag did.
+func startMarqueeWith(repo string, flags []string, childArgv []string) (*marqueeProc, error) {
 	listenPort, err := freePort()
 	if err != nil {
 		return nil, err
@@ -164,20 +174,23 @@ func startMarqueeAt(repo string, upstreamArgs ...string) (*marqueeProc, error) {
 		return nil, err
 	}
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(listenPort))
-	args := append([]string{
+	args := []string{
 		"--listen", addr,
 		"--internal-port", strconv.Itoa(internalPort),
 		"--no-open",
-		"--", upstreamBin,
-	}, upstreamArgs...)
+	}
+	args = append(args, flags...)
+	args = append(args, "--")
+	args = append(args, childArgv...)
 	cmd := exec.Command(marqueeBin, args...)
 	cmd.Dir = repo
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+	out := &bytes.Buffer{}
+	cmd.Stdout = io.MultiWriter(os.Stderr, out)
+	cmd.Stderr = cmd.Stdout
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting marquee: %w", err)
 	}
-	return &marqueeProc{cmd: cmd, addr: addr, baseURL: "http://" + addr, internalPort: internalPort}, nil
+	return &marqueeProc{cmd: cmd, addr: addr, baseURL: "http://" + addr, internalPort: internalPort, output: out}, nil
 }
 
 func (p *marqueeProc) waitHealthy(timeout time.Duration) error {

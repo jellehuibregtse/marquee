@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
+	"github.com/jellehuibregtse/marquee/internal/hook"
 	portpkg "github.com/jellehuibregtse/marquee/internal/port"
 	"github.com/jellehuibregtse/marquee/internal/proxy"
 	"github.com/jellehuibregtse/marquee/internal/runner"
@@ -267,8 +268,7 @@ func newIntHarnessHook(t *testing.T, switchHook string) *intHarness {
 		Dir:           main,
 		Logger:        log.New(io.Discard, "", 0),
 		HealthTimeout: 1500 * time.Millisecond,
-		SwitchHook:    switchHook,
-		HookTimeout:   10 * time.Second,
+		Hook:          hook.New(hook.Config{Command: switchHook, Timeout: 10 * time.Second}),
 	})
 	sw := switcher.New(switcher.Config{Token: testToken, Orchestrator: orch, Logger: log.New(io.Discard, "", 0)})
 	mux := proxy.NewInternalMux()

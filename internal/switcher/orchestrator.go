@@ -1,18 +1,16 @@
 package switcher
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log"
-	"os/exec"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
+	"github.com/jellehuibregtse/marquee/internal/hook"
 	"github.com/jellehuibregtse/marquee/internal/switching"
 )
 
@@ -105,13 +103,11 @@ type OrchestratorConfig struct {
 	RestartTimeout time.Duration
 	// HealthTimeout bounds the post-restart readiness wait; defaults to 30s.
 	HealthTimeout time.Duration
-	// SwitchHook is the optional operator command run in a worktree (cwd = git's
-	// own worktree path) to bootstrap it before the child starts there. It is CLI
-	// input, never request- or slug-derived, run through "sh -c". Empty disables
-	// it. See docs/security.md, Threat 4.
-	SwitchHook string
-	// HookTimeout bounds the switch hook; defaults to 5m (bootstrapping is slow).
-	HookTimeout time.Duration
+	// Hook runs the operator's bootstrap command in a worktree (cwd = git's own
+	// worktree path) before the child starts there. main owns it because the
+	// initial child start needs the same hook before any orchestrator exists. A
+	// nil Hook disables it. See docs/security.md, Threat 4.
+	Hook *hook.Runner
 }
 
 // Orchestrator owns a worktree switch end to end behind Switch: the restart
@@ -131,8 +127,7 @@ type Orchestrator struct {
 
 	restartTimeout time.Duration
 	healthTimeout  time.Duration
-	switchHook     string
-	hookTimeout    time.Duration
+	hook           *hook.Runner
 
 	mu         sync.Mutex
 	currentDir string
@@ -171,8 +166,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		currentDir:     cfg.Dir,
 		restartTimeout: orDuration(cfg.RestartTimeout, 30*time.Second),
 		healthTimeout:  orDuration(cfg.HealthTimeout, 30*time.Second),
-		switchHook:     cfg.SwitchHook,
-		hookTimeout:    orDuration(cfg.HookTimeout, 5*time.Minute),
+		hook:           cfg.Hook,
 		terminated:     make(chan struct{}),
 	}
 	if o.logger == nil {
@@ -279,7 +273,7 @@ func (o *Orchestrator) Switch(ctx context.Context, plan Plan) Result {
 	// would be pointless work that can itself race its own teardown into a stale
 	// process-manager socket and leave the dev server dead after what was only a
 	// harmless hook failure.
-	if err := o.runSwitchHook(ctx, plan.Path); err != nil {
+	if err := o.hook.Run(ctx, plan.Path); err != nil {
 		o.logf("switch to %q failed in switch-hook: %v; left the child running in %q untouched", plan.Slug, err, prevDir)
 		result.Outcome = OutcomeHookFailedBeforeStart
 		return result
@@ -364,7 +358,7 @@ func (o *Orchestrator) switchInto(ctx context.Context, dir, slug string) error {
 // spurious hook error — if the restart then fails, the both-failed path reports
 // it honestly.
 func (o *Orchestrator) revertInto(ctx context.Context, dir, slug string) error {
-	if err := o.runSwitchHook(ctx, dir); err != nil {
+	if err := o.hook.Run(ctx, dir); err != nil {
 		o.logf("revert switch-hook in %q failed; restarting the previously-working worktree anyway: %v", dir, err)
 	}
 	return o.switchInto(ctx, dir, slug)
@@ -381,76 +375,8 @@ func (o *Orchestrator) setPhase(p switching.Phase, slug string) {
 	o.progress.Store(switching.Progress{Phase: p, Slug: slug, Since: now})
 }
 
-// runSwitchHook runs the operator's switch hook in the given worktree so a fresh
-// worktree can be bootstrapped before the child starts there. It is a no-op when
-// no hook is configured. The hook's stdout and stderr are streamed to marquee's
-// logger, prefixed, so the user sees bootstrap progress and errors; a non-zero
-// exit or a timeout returns an error, which the caller turns into a reverting
-// switch failure.
-func (o *Orchestrator) runSwitchHook(ctx context.Context, dir string) error {
-	if o.switchHook == "" {
-		return nil
-	}
-	o.logf("switch-hook: running %q in %s", o.switchHook, dir)
-
-	hctx, cancel := context.WithTimeout(ctx, o.hookTimeout)
-	defer cancel()
-
-	// #nosec G204 -- switchHook is the operator's own CLI flag value (like the
-	// wrapped dev command itself), never derived from the HTTP request or the
-	// slug; dir is git's own worktree path, not request input. Running it via
-	// "sh -c" is deliberate so operators can write pipelines and && chains.
-	cmd := exec.CommandContext(hctx, "sh", "-c", o.switchHook)
-	cmd.Dir = dir
-	// Run the hook in its own process group and kill the whole group on timeout,
-	// so a hook like "bundle install" doesn't leak its children (ruby, native
-	// builds) when it hangs — mirroring how the runner reaps the child. WaitDelay
-	// bounds how long we wait for I/O to drain after.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = 5 * time.Second
-	out := &hookOutput{logf: o.logf}
-	cmd.Stdout = out
-	cmd.Stderr = out
-	err := cmd.Run()
-	out.flush()
-	if err != nil {
-		return fmt.Errorf("switch-hook %q failed: %w", o.switchHook, err)
-	}
-	return nil
-}
-
 func (o *Orchestrator) logf(format string, args ...any) {
 	o.logger.Printf("marquee: "+format, args...)
-}
-
-// hookOutput forwards a subprocess's combined output to the logger one line at
-// a time, each line prefixed so switch-hook progress is distinguishable in
-// marquee's stderr. os/exec guarantees no concurrent Write when the same writer
-// is used for both Stdout and Stderr, so no lock is needed.
-type hookOutput struct {
-	logf func(string, ...any)
-	buf  []byte
-}
-
-func (o *hookOutput) Write(p []byte) (int, error) {
-	o.buf = append(o.buf, p...)
-	for {
-		i := bytes.IndexByte(o.buf, '\n')
-		if i < 0 {
-			break
-		}
-		o.logf("switch-hook: %s", o.buf[:i])
-		o.buf = o.buf[i+1:]
-	}
-	return len(p), nil
-}
-
-func (o *hookOutput) flush() {
-	if len(o.buf) > 0 {
-		o.logf("switch-hook: %s", o.buf)
-		o.buf = nil
-	}
 }
 
 func orDuration(d, fallback time.Duration) time.Duration {

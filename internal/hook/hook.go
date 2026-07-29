@@ -125,23 +125,11 @@ func (r *Runner) Run(ctx context.Context, inv Invocation) error {
 	hctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	// #nosec G204 -- command is the operator's own CLI flag value (like the
-	// wrapped dev command itself), never derived from the HTTP request or the
-	// slug; dir is git's own worktree path, not request input. The one
-	// request-touched value in play, the slug, is already an exact match against
-	// git's worktree list and reaches the hook only as an environment entry, so it
-	// cannot extend the command. Running it via "sh -c" is deliberate so operators
-	// can write pipelines and && chains.
-	cmd := exec.CommandContext(hctx, "sh", "-c", r.command)
-	cmd.Dir = dir
+	cmd := OperatorCommand(hctx, r.command, dir)
+	// The switch reaches the hook through the environment, never through the
+	// command text. Setting Env explicitly replaces the inherited copy, so the
+	// parent's variables are re-added rather than assumed.
 	cmd.Env = append(os.Environ(), inv.env()...)
-	// Run the hook in its own process group and kill the whole group on timeout,
-	// so a hook like "bundle install" doesn't leak its children (ruby, native
-	// builds) when it hangs — mirroring how the runner reaps the child. WaitDelay
-	// bounds how long we wait for I/O to drain after.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = 5 * time.Second
 	out := &output{logf: r.logf}
 	cmd.Stdout = out
 	cmd.Stderr = out
@@ -157,6 +145,33 @@ func (r *Runner) Run(ctx context.Context, inv Invocation) error {
 		return fmt.Errorf("switch-hook %q failed: %w", r.command, err)
 	}
 	return nil
+}
+
+// OperatorCommand builds an "sh -c" command for a script the operator supplied
+// on the command line, to run in a worktree. It is the one place marquee spawns
+// operator script text: the switch hook goes through it, and so does the switch's
+// readiness command (--ready-cmd), which needs the same cwd and the same
+// process-group discipline but handles its own output. The caller sets the output
+// sinks and, if the script should be told anything, cmd.Env.
+//
+// #nosec G204 -- script is an operator CLI flag value (--switch-hook or
+// --ready-cmd), exactly like the wrapped dev command itself, and is never derived
+// from the HTTP request or the switch slug; dir is git's own worktree path, not
+// request input. The one request-touched value anywhere near a hook, the slug, is
+// already an exact match against git's worktree list and reaches the script only
+// as an environment entry, so it cannot extend the command. Running it via
+// "sh -c" is deliberate so operators can write pipelines and && chains.
+func OperatorCommand(ctx context.Context, script, dir string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd.Dir = dir
+	// Run the script in its own process group and kill the whole group when ctx
+	// ends, so a script like "bundle install" doesn't leak its children (ruby,
+	// native builds) when it hangs — mirroring how the runner reaps the child.
+	// WaitDelay bounds how long we wait for I/O to drain after.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 5 * time.Second
+	return cmd
 }
 
 // The tail kept for a failing hook is bounded on both axes, so a chatty hook

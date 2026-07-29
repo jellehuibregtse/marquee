@@ -38,7 +38,7 @@ Where things live, so a task starts from the right file instead of a re-explorat
 - `internal/knob/` — the knob catalog: single owner of every knob's ids, defaults, labels, and theme palettes.
 - `internal/ghinfo/` — pull request lookup via the `gh` CLI (cached, optional).
 - `internal/runner/` — child process lifecycle: spawn in its own process group, stop, restart.
-- `internal/hook/` — the `--switch-hook` runner: one unit that bootstraps a worktree before the child starts there, used by `main` for the initial start and by the switch orchestrator for the switch and revert legs.
+- `internal/hook/` — the `--switch-hook` runner: one unit that bootstraps a worktree before the child starts there, used by `main` for the initial start and by the switch orchestrator for the switch and revert legs. `OperatorCommand` is the exported seam: the only place operator script text becomes a process (own process group, group kill on context end, `#nosec` reasoning), shared with the switch's `--ready-cmd`.
 - `internal/port/` — loopback TCP port inspection and reclaim.
 
 ## Bar UI structure

@@ -178,6 +178,8 @@ With `OVERMIND_NO_PORT=1`, overmind leaves `PORT` alone and your `web` process i
 
 Only the web process's port matters. A separate asset/HMR server (Vite and similar) serves on its own port that the page references directly — those requests bypass marquee entirely, which is correct; marquee only needs the HTML document.
 
+**Variables that differ per worktree.** marquee hands the child its own environment on every start and restart, so anything exported in the shell you launched marquee from follows you into every worktree you switch into. A value that must differ per worktree therefore has to come from somewhere that beats an inherited one, and whether your loader does that is worth checking: overmind's `.env` wins over an exported variable (by default it reads `./.env` and `./.overmind.env`; `-e` or `OVERMIND_ENV_FILE` points it elsewhere), while dotenv-style loaders leave a variable that is already set alone. With a dotenv-style loader, `export DATABASE_NAME=…` typed once in your shell silently pins every worktree to that database, whatever each worktree's own env file says.
+
 ## FAQ
 
 ### Why is my bar missing?

@@ -250,6 +250,20 @@ this surface: it runs before the listener serves a single request, with the `cwd
 taken from `os.Getwd`. See the "Worktree switch endpoint" section for where the
 hook sits in the guard/switch sequence.
 
+**`--ready-cmd` does not widen it either.** The optional readiness command (an
+extra gate the target must pass before a switch counts as a success, such as
+`curl -sf localhost:3036`) is operator input from a CLI flag on exactly the same
+footing as `--switch-hook`: it is never derived from the HTTP request or the
+slug, and the slug still only selects *which* git-reported worktree the command
+runs in. It is spawned by `Orchestrator.operatorCommand`, which carries its own
+justified `#nosec G204` recording that the script is operator-only and the `cwd`
+is git's own worktree path. Like the hook it runs in its own process group, and
+the group is SIGKILLed when the health timeout expires, so a hanging readiness
+check cannot leak the tree it spawned.
+Every guard still precedes it: a request that fails the origin, token, slug, or
+dirty check spawns nothing, and the readiness command runs only after the child's
+own port has already answered.
+
 The one signal-adjacent path from v1 — the stale-child pidfile warning — is
 hardened against corrupt input: see Threat 7's pidfile note.
 
@@ -262,7 +276,14 @@ hardened against corrupt input: see Threat 7's pidfile note.
   two worktrees: a valid, same-origin, correctly-tokened switch restarts the
   child in **git's** worktree path and repoints the pollers there),
   `TestRestartFailureRevertsAndReportsFailure` (a failed restart reverts, never
-  repoints to the target, and reports failure) in
+  repoints to the target, and reports failure),
+  `TestReadyCmdNeverRunsForRejectedRequest` (a request that fails the token guard
+  spawns no readiness command and no restart),
+  `TestReadyCmdIsRetriedInTargetWorktreeUntilItPasses` (the readiness command's
+  `cwd` is the target worktree) and
+  `TestReadyCmdHangKillsItsProcessGroup` (a readiness command that hangs after
+  spawning a background grandchild is killed at the health timeout **and** the
+  grandchild goes with it, so the group kill is proven rather than asserted) in
   `internal/switcher/switcher_test.go`.
 
 ## Threat 5 — Malicious / compromised upstream responses
@@ -502,8 +523,10 @@ Only after all guards pass does marquee — optionally — run the operator's
 `--switch-hook` in the **target worktree** (`cwd` = git's own worktree path), then
 stop the child and `runner.Restart(ctx, worktreePath)` (which reclaims marquee's
 internal port before the spawn — see "Reclaiming the internal port" below),
-TCP-health-poll the new child, **require that the child is still running** (a
-passing probe alone is not proof it booted — see the shutdown-path note), and —
+TCP-health-poll the new child, retry the operator's `--ready-cmd` in the target
+worktree until it exits 0 (when one is configured), **require that the child is
+still running** (a passing probe alone is not proof it booted — see the
+shutdown-path note), and —
 only once it is both healthy and alive — **repoint both the gitinfo and ghinfo
 pollers** to the new worktree (otherwise the bar keeps reporting the old worktree — the exact lie the
 tool exists to prevent). `Poller.Repoint` swaps the collection directory under

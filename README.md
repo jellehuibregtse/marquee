@@ -76,6 +76,7 @@ Everything after `--` is your command, run verbatim.
 | `--quiet` | off | Suppress marquee's own log lines. |
 | `--allow-host` | — | Add a hostname to the internal-endpoint allowlist (repeatable). |
 | `--switch-hook` | — | Command run in a worktree before the child starts there, e.g. `"bundle install"`, including the worktree marquee itself is launched in. Bootstraps a fresh worktree; see [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |
+| `--ready-cmd` | — | Extra readiness check the target worktree must pass before a switch counts as a success, e.g. `"curl -sf localhost:3036 && curl -sf localhost:7433"`. Runs in the target worktree once the child's own port answers, and is retried every 500ms until it exits 0 or `--health-timeout` expires. Its output is logged only when it gives up, and the revert after a failed switch is not gated on it. |
 | `--hook-timeout` | `5m` | How long `--switch-hook` may run before marquee kills its process group. Raise it if bootstrapping a cold worktree (gems with native extensions, a database clone, migrations) takes longer. |
 | `--health-timeout` | `30s` | How long to wait for a restarted child to become healthy before the switch reverts. |
 | `--restart-timeout` | `30s` | How long a single stop-and-spawn of the child may take. |

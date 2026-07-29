@@ -1,12 +1,16 @@
 package switcher
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log"
+	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
@@ -130,7 +134,22 @@ type OrchestratorConfig struct {
 	// initial child start needs the same hook before any orchestrator exists. A
 	// nil Hook disables it. See docs/security.md, Threat 4.
 	Hook *hook.Runner
+	// ReadyCmd is the optional operator readiness command: an extra gate the
+	// target must pass before a switch is called a success, retried until it exits
+	// 0 or HealthTimeout expires. It runs after Health, in the target worktree,
+	// through "sh -c". It covers what a TCP accept on the child's own port cannot,
+	// such as a Vite dev server or a worker health endpoint on a fixed port that a
+	// remnant of the previous stack may still be holding. Like the hook command it
+	// is CLI input, never request- or slug-derived. Empty disables it. See
+	// docs/security.md, Threat 4.
+	ReadyCmd string
 }
+
+// readyRetryInterval is how long to wait between attempts of ReadyCmd. A stack
+// coming up takes seconds, so half a second is frequent enough to not add
+// noticeable latency to a switch and slow enough that a command spawning a shell
+// (curl, pg_isready) is not run in a tight loop.
+const readyRetryInterval = 500 * time.Millisecond
 
 // Orchestrator owns a worktree switch end to end behind Switch: the restart
 // into the target, the readiness gate (health probe plus child-liveness), the
@@ -150,6 +169,7 @@ type Orchestrator struct {
 	restartTimeout time.Duration
 	healthTimeout  time.Duration
 	hook           *hook.Runner
+	readyCmd       string
 
 	mu sync.Mutex
 	// current is the worktree the child is running in, named as git names it. Both
@@ -192,6 +212,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		restartTimeout: orDuration(cfg.RestartTimeout, DefaultRestartTimeout),
 		healthTimeout:  orDuration(cfg.HealthTimeout, DefaultHealthTimeout),
 		hook:           cfg.Hook,
+		readyCmd:       cfg.ReadyCmd,
 		terminated:     make(chan struct{}),
 	}
 	if o.logger == nil {
@@ -310,7 +331,7 @@ func (o *Orchestrator) Switch(ctx context.Context, plan Plan) Result {
 		return result
 	}
 
-	if err := o.switchInto(ctx, target, plan.Slug); err == nil {
+	if err := o.switchInto(ctx, target, plan.Slug, true); err == nil {
 		result.Outcome = OutcomeSuccess
 		return result
 	} else {
@@ -338,10 +359,12 @@ func (o *Orchestrator) Switch(ctx context.Context, plan Plan) Result {
 // returns the error and leaves the current worktree untouched so a revert
 // restores it. phaseSlug is what the interstitial shows, which on a revert is
 // still the target the user asked for rather than the worktree being restored.
-// switchInto deliberately does NOT run the switch hook: bootstrapping happens
-// once, before the child is stopped (see Switch), so a hook failure is handled
-// there and never reaches this restart step.
-func (o *Orchestrator) switchInto(ctx context.Context, tgt worktree, phaseSlug string) error {
+// readyGate says whether the operator's readiness command is part of "healthy"
+// for this leg; see revertInto for why the revert leg turns it off. switchInto
+// deliberately does NOT run the switch hook: bootstrapping happens once, before
+// the child is stopped (see Switch), so a hook failure is handled there and never
+// reaches this restart step.
+func (o *Orchestrator) switchInto(ctx context.Context, tgt worktree, phaseSlug string, readyGate bool) error {
 	rctx, cancel := context.WithTimeout(ctx, o.restartTimeout)
 	defer cancel()
 	if err := o.child.Restart(rctx, tgt.dir); err != nil {
@@ -349,12 +372,26 @@ func (o *Orchestrator) switchInto(ctx context.Context, tgt worktree, phaseSlug s
 	}
 	o.setPhase(switching.Booting, phaseSlug)
 
-	if o.health != nil {
+	// Probing covers both readiness gates and is recorded once, so the timeline
+	// stays a record of distinct stages rather than one entry per gate.
+	if o.health != nil || (readyGate && o.readyCmd != "") {
 		o.setPhase(switching.Probing, phaseSlug)
+	}
+
+	if o.health != nil {
 		hctx, hcancel := context.WithTimeout(ctx, o.healthTimeout)
 		err := o.health(hctx)
 		hcancel()
 		if err != nil {
+			return err
+		}
+	}
+
+	// The operator's readiness command is the second, wider gate, and it runs only
+	// once the cheap TCP accept has passed so a target that never listens at all
+	// fails without spawning anything.
+	if readyGate {
+		if err := o.waitReady(ctx, tgt.dir); err != nil {
 			return err
 		}
 	}
@@ -364,7 +401,8 @@ func (o *Orchestrator) switchInto(ctx context.Context, tgt worktree, phaseSlug s
 	// escaped remnant of the OLD child still holding the internal port. Require
 	// the child to be actually running, so a switch to a child that has exited is
 	// a failure (and reverts) rather than a fake success that later shuts marquee
-	// down.
+	// down. Asserting it last also catches a child that died while the readiness
+	// command was still being retried.
 	if !o.child.Alive() {
 		return fmt.Errorf("child exited before becoming healthy in %s", tgt.dir)
 	}
@@ -390,6 +428,12 @@ func (o *Orchestrator) switchInto(ctx context.Context, tgt worktree, phaseSlug s
 // so recovery still attempts the restart rather than stranding the user on a
 // spurious hook error — if the restart then fails, the both-failed path reports
 // it honestly.
+//
+// The readiness command is the mirror image: the revert is not gated on it. This
+// leg only has to get the dev server back up, and the wider check is exactly the
+// one likeliest to keep failing (a stale port holder, or a command the operator
+// typed wrong), which would turn a reverted switch into a reported "the dev
+// server is down" while the previous worktree is in fact running again.
 func (o *Orchestrator) revertInto(ctx context.Context, prev, failed worktree) error {
 	if err := o.hook.Run(ctx, hook.Invocation{
 		Leg:        hook.LegRevert,
@@ -399,7 +443,7 @@ func (o *Orchestrator) revertInto(ctx context.Context, prev, failed worktree) er
 	}); err != nil {
 		o.logf("revert switch-hook in %q failed; restarting the previously-working worktree anyway: %v", prev.dir, err)
 	}
-	return o.switchInto(ctx, prev, failed.slug)
+	return o.switchInto(ctx, prev, failed.slug, false)
 }
 
 // setPhase records a phase transition (with its timestamp, for timing) and
@@ -413,8 +457,111 @@ func (o *Orchestrator) setPhase(p switching.Phase, slug string) {
 	o.progress.Store(switching.Progress{Phase: p, Slug: slug, Since: now})
 }
 
+// waitReady runs the operator's readiness command in the target worktree until
+// it exits 0 or the health timeout expires, and is a no-op when none is
+// configured. It is the gate for everything a TCP accept on the child's own port
+// cannot see: with a process manager the stack has other fixed ports (an asset
+// server, a worker's health endpoint), and if a remnant of the previous stack
+// still holds one of them the web port comes up and the probe passes on a
+// half-dead stack. Retrying is the point — a stack comes up in stages, so the
+// first attempts are expected to fail — which is also why the command's output is
+// not streamed: it would fill the log with the same "connection refused" once
+// per attempt. Only the last attempt's output is logged, when the gate gives up.
+//
+// The timeout is a budget of its own rather than a share of the one the TCP wait
+// already used, so a slow-but-successful port wait cannot leave the readiness
+// command no time to pass.
+func (o *Orchestrator) waitReady(ctx context.Context, dir string) error {
+	if o.readyCmd == "" {
+		return nil
+	}
+	o.logf("ready-cmd: waiting for %q in %s", o.readyCmd, dir)
+
+	rctx, cancel := context.WithTimeout(ctx, o.healthTimeout)
+	defer cancel()
+
+	attempts := 0
+	for {
+		attempts++
+		out, err := o.runReadyCmd(rctx, dir)
+		if err == nil {
+			o.logf("ready-cmd: passed after %d attempt(s)", attempts)
+			return nil
+		}
+		select {
+		case <-rctx.Done():
+			o.logReadyOutput(out)
+			return fmt.Errorf("ready-cmd %q did not pass within %s (%d attempts, last: %w)",
+				o.readyCmd, o.healthTimeout, attempts, err)
+		case <-time.After(readyRetryInterval):
+		}
+	}
+}
+
+// runReadyCmd runs the readiness command once and returns its combined output
+// alongside the run error. The output is capped: the command is retried, so a
+// chatty failure must not grow marquee's memory attempt after attempt.
+func (o *Orchestrator) runReadyCmd(ctx context.Context, dir string) ([]byte, error) {
+	cmd := o.operatorCommand(ctx, o.readyCmd, dir)
+	out := &capBuffer{max: 8 << 10}
+	cmd.Stdout = out
+	cmd.Stderr = out
+	err := cmd.Run()
+	return out.buf.Bytes(), err
+}
+
+// logReadyOutput repeats the last attempt's output, one line at a time and
+// prefixed, when the gate gives up.
+func (o *Orchestrator) logReadyOutput(out []byte) {
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if line != "" {
+			o.logf("ready-cmd: %s", line)
+		}
+	}
+}
+
+// operatorCommand builds an "sh -c" command for an operator-supplied script, run
+// with its cwd set to a worktree.
+func (o *Orchestrator) operatorCommand(ctx context.Context, script, dir string) *exec.Cmd {
+	// #nosec G204 -- script is the operator's own --ready-cmd CLI flag value,
+	// exactly like the wrapped dev command itself, and is never derived from the
+	// HTTP request or the switch slug; dir is git's own worktree path, not request
+	// input. The "sh -c" form is deliberate so operators can write pipelines and
+	// && chains.
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd.Dir = dir
+	// Run it in its own process group and kill the whole group on timeout, so a
+	// script that spawns children doesn't leak them when it hangs, mirroring how
+	// the runner reaps the child and how the switch hook is run. WaitDelay bounds
+	// how long we wait for I/O to drain after.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 5 * time.Second
+	return cmd
+}
+
 func (o *Orchestrator) logf(format string, args ...any) {
 	o.logger.Printf("marquee: "+format, args...)
+}
+
+// capBuffer collects at most max bytes and silently drops the rest, so capturing
+// a retried command's output cannot grow without bound.
+type capBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (c *capBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if room := c.max - c.buf.Len(); room > 0 {
+		if n > room {
+			p = p[:room]
+		}
+		c.buf.Write(p)
+	}
+	// Report the whole write as accepted; a short count would abort the copy the
+	// command's output is being drained through.
+	return n, nil
 }
 
 func orDuration(d, fallback time.Duration) time.Duration {

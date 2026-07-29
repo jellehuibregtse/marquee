@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +94,94 @@ func TestSwitchHappyPathOverHTTP(t *testing.T) {
 		}
 		return payload.Branch == featureBranch
 	})
+}
+
+// TestSwitchFailsWhenReadyCmdNeverPasses covers the rest of main's switch wiring:
+// a --ready-cmd that always fails must fail the switch even though the child's
+// port comes up fine, and it must give up on the --health-timeout it was handed.
+// A --health-timeout that never reached the orchestrator would fall back to 30s
+// and blow the bound below.
+func TestSwitchFailsWhenReadyCmdNeverPasses(t *testing.T) {
+	tmp := t.TempDir()
+	mainWt := filepath.Join(tmp, "main")
+	featureWt := filepath.Join(tmp, "feature")
+	if err := makeSwitchRepo(mainWt, featureWt, "marquee-e2e-not-ready"); err != nil {
+		t.Fatalf("build repo: %v", err)
+	}
+
+	args := []string{"--ready-cmd", "exit 1", "--health-timeout", "1s"}
+	proc, err := startMarqueeWith(mainWt, args, []string{upstreamBin, "-tag=not-ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proc.stop() })
+	if err := proc.waitHealthy(15 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	status, body := postSwitch(t, proc, `{"slug":"feature","confirm":true}`)
+	elapsed := time.Since(start)
+	if status != http.StatusBadGateway {
+		t.Fatalf("switch status = %d, want 502; body %s", status, body)
+	}
+	var failed struct {
+		Error    string `json:"error"`
+		Reverted bool   `json:"reverted"`
+	}
+	if err := json.Unmarshal(body, &failed); err != nil {
+		t.Fatalf("switch response not JSON: %v: %s", err, body)
+	}
+	if failed.Error != "switch_failed" || !failed.Reverted {
+		t.Errorf("switch response = %+v, want switch_failed reverted=true", failed)
+	}
+	if elapsed > 15*time.Second {
+		t.Errorf("switch took %s with --health-timeout 1s: the flag did not reach the switch", elapsed)
+	}
+
+	// The revert is not gated on --ready-cmd, so the app serves again.
+	if err := proc.waitHealthy(15 * time.Second); err != nil {
+		t.Fatalf("app did not come back after the reverted switch: %v", err)
+	}
+}
+
+// postSwitch posts a switch request the way the injected bar does: a same-origin
+// Origin header plus the minted token.
+func postSwitch(t *testing.T, proc *marqueeProc, body string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, proc.baseURL+"/__marquee/switch", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = proc.addr
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", proc.baseURL)
+	req.Header.Set("X-Marquee-Token", switchToken(t, proc.baseURL))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp.StatusCode, out
+}
+
+// processIDs returns the pids pgrep -f finds for pattern as one comparable
+// string. The pattern carries the per-run temp dir, so nothing unrelated matches.
+func processIDs(t *testing.T, pattern string) string {
+	t.Helper()
+	out, err := exec.Command("pgrep", "-f", pattern).Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return ""
+		}
+		t.Fatalf("pgrep -f %q: %v", pattern, err)
+	}
+	fields := strings.Fields(string(out))
+	sort.Strings(fields)
+	return strings.Join(fields, ",")
 }
 
 // switchToken fetches an injected page and extracts the minted switch token.

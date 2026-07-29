@@ -76,10 +76,10 @@ Everything after `--` is your command, run verbatim.
 | `--quiet` | off | Suppress marquee's own log lines. |
 | `--allow-host` | — | Add a hostname to the internal-endpoint allowlist (repeatable). |
 | `--switch-hook` | — | Command run in a worktree before the child starts there, e.g. `"bundle install"`, including the worktree marquee itself is launched in. Bootstraps a fresh worktree; see [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |
-| `--worktree-glob` | — | Restrict which worktrees are switch targets, matched against the worktree's absolute path (repeatable), e.g. `--worktree-glob '/Users/me/code/*'`. With no glob every worktree is a target. The main worktree is always a target, so you can always switch back. `*` does not cross a `/`, so point a glob at a directory's contents with a trailing `/*`. |
-| `--ready-cmd` | — | Extra readiness check the target worktree must pass before a switch counts as a success, e.g. `"curl -sf localhost:3036 && curl -sf localhost:7433"`. Runs in the target worktree once the child's own port answers, and is retried every 500ms until it exits 0 or `--health-timeout` expires. Its output is logged only when it gives up, and the revert after a failed switch is not gated on it. |
-| `--hook-timeout` | `5m` | How long `--switch-hook` may run before marquee kills its process group. Raise it if bootstrapping a cold worktree (gems with native extensions, a database clone, migrations) takes longer. |
-| `--health-timeout` | `30s` | How long to wait for a restarted child to become healthy before the switch reverts. |
+| `--hook-timeout` | `5m` | How long `--switch-hook` may run before marquee kills its process group. Raise it for a slow bootstrap; see [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |
+| `--worktree-glob` | — | Only offer worktrees whose absolute path matches this glob as switch targets (repeatable). See [Switching worktrees](#switching-worktrees). |
+| `--ready-cmd` | — | Extra readiness check the target must pass before a switch counts as a success, e.g. `"curl -sf localhost:3036"`. See [Switching worktrees](#switching-worktrees). |
+| `--health-timeout` | `30s` | How long to wait for the restarted child's port, and separately for `--ready-cmd`, before the switch reverts. |
 | `--restart-timeout` | `30s` | How long a single stop-and-spawn of the child may take. |
 | `--unsafe-listen` | off | Allow a non-loopback `--listen` address. Prints a persistent warning; exposes your dev app to the network. |
 
@@ -120,7 +120,7 @@ So a hook that only wants to do the expensive setup for a worktree it has not se
 marquee --switch-hook 'test "$MARQUEE_HOOK_LEG" = revert && rm -f .overmind.sock; bin/setup "$MARQUEE_TARGET_SLUG"' -- overmind start
 ```
 
-A failing hook (non-zero exit or a 5-minute timeout) never leaves you with a half-switched app:
+A failing hook (a non-zero exit, or a timeout: 5 minutes unless you raise `--hook-timeout`) never leaves you with a half-switched app:
 
 - **at startup** marquee refuses to start your dev command and exits non-zero;
 - **on a switch** the hook runs before the current child is stopped, so a failure fails the switch and leaves your running app untouched;
@@ -129,6 +129,32 @@ A failing hook (non-zero exit or a 5-minute timeout) never leaves you with a hal
 The hook's output is streamed as it runs, which `--quiet` suppresses along with marquee's other progress lines. The last lines of a *failing* hook are printed again as an error, so `--quiet` never hides why a bootstrap failed.
 
 While the hook runs at startup, marquee is already serving: a browser that arrives mid-bootstrap gets the same self-refreshing "app is starting" page it gets while your dev server boots. Ctrl-C during a bootstrap stops the hook and its child processes.
+
+### Switching worktrees
+
+The bar's picker repoints marquee at another worktree of the same repo: it bootstraps the target as described above, restarts your dev command there, waits for the target to come up, and reverts to where you were if it doesn't. The flags below cover the rest of that: whether the target counts as healthy, and which worktrees you can switch into at all.
+
+Once the child has restarted, marquee waits for it to accept a connection on its internal port. That is all a TCP check can tell you, and with a process manager it is not the whole stack: the asset server and the workers have their own fixed ports, and a remnant of the old stack still holding one of them looks fine from the web port. `--ready-cmd` is the check for that. It runs in the target worktree, retried every 500ms until it exits 0 or `--health-timeout` expires:
+
+```sh
+marquee --ready-cmd "curl -sf localhost:3036 && curl -sf localhost:7433/health" -- bin/dev
+```
+
+The early attempts are expected to fail while things come up, so its output is not streamed; you see it only if the check never passes. `--health-timeout` applies to the port wait and to the readiness command separately, so a slow but successful port wait can't leave the readiness check no time to pass. The revert after a failed switch is not gated on `--ready-cmd`, since that leg only has to get your dev server back up. `--restart-timeout` bounds one stop-and-spawn of the child, which is the step before either check.
+
+`--worktree-glob` decides which worktrees are offered at all, matched against the worktree's absolute path:
+
+```sh
+marquee --worktree-glob '/Users/me/code/wt/*' -- bin/dev
+```
+
+With no glob, every worktree git knows about is a target. Repeat the flag to keep several places. The main worktree is always a target, whatever the globs say, because switching back to it is how you get out of a dirty or broken worktree. marquee logs the surviving target set at startup whenever you pass a glob, and warns when nothing but the main worktree survived, because three things trip people up:
+
+- **`*` never crosses a `/`.** `/path/*` matches `/path/one` but not `/path/one/two`, and `/path/**` matches exactly the same set as `/path/*` (it reads as recursive; it isn't). Point the glob one level up from the worktrees you mean.
+- **Match the path git reports, which is the resolved one.** On macOS a worktree you think of as `/tmp/wt/feature` is `/private/tmp/wt/feature` to git, and a glob under `/tmp/...` never matches it.
+- **Matching is case-sensitive**, even on a case-insensitive filesystem like the macOS default.
+
+One consequence worth knowing: the bar only shows its switcher when more than one worktree survives filtering, so globs that match nothing leave you with no switcher at all. Switching back to main stays possible over the API either way.
 
 ### Attach mode
 

@@ -236,7 +236,15 @@ revert. When a switch does get far enough to stop the child before failing, the
 revert re-runs the hook in the previous worktree — still the operator's own CLI
 command, cwd set to git's own worktree path — so a cleanup step can clear stale
 process-manager state before the child restarts there; this reuses the same
-operator-only command and adds no request-derived input. The startup leg (the
+operator-only command and adds no request-derived input. The hook is told which
+worktree it is bootstrapping through its **environment** (`MARQUEE_HOOK_LEG`,
+`MARQUEE_TARGET_SLUG`, `MARQUEE_TARGET_DIR`, `MARQUEE_PREV_DIR`), which does not
+change that: the slug there is the one `Prepare` already resolved by exact match
+against git's own worktree list, the directories are git's own paths, and every
+value is passed as an `exec.Cmd.Env` entry, so none of it is ever concatenated
+into the command `sh -c` parses. A hook that chooses to interpolate
+`$MARQUEE_TARGET_SLUG` into a shell word is running the operator's own script
+against a name git vouched for. The startup leg (the
 hook in the launch worktree, before the first child start) is further still from
 this surface: it runs before the listener serves a single request, with the `cwd`
 taken from `os.Getwd`. See the "Worktree switch endpoint" section for where the
@@ -687,7 +695,7 @@ with a fixed token, and no golden encodes the random value.
   phase timeline, and the `monitor` that forwards only unhandled child deaths to
   `Terminated`); `Runner.Run` and the bounded failure tail in
   `internal/hook/hook.go` (the operator hook itself: own process group, group kill
-  on timeout and the output sinks);
+  on timeout, the `Invocation` environment and the output sinks);
   `Runner.Exits` (re-arming, reporting only exits the runner did not cause),
   `Runner.Alive`, the `stopping` flag that swallows Stop/Restart exits at the
   source, and the wait goroutine in `internal/runner/runner.go` (BeginManaged /
@@ -735,7 +743,11 @@ with a fixed token, and no golden encodes the random value.
   `TestIntegrationSwitchHookRunsOnRevert` (the hook runs on both legs — forward
   and revert), `TestIntegrationRevertHookClearsStaleBlocker` (the revert hook is
   load-bearing: it clears a stale-socket-shaped blocker in the previous worktree
-  so the revert recovers, reproducing the real incident) in
+  so the revert recovers, reproducing the real incident),
+  `TestIntegrationSwitchHookEnvironmentPerLeg` (one request produces both legs and
+  each one's four `MARQUEE_*` values are asserted) and
+  `TestIntegrationRevertNamesTheWorktreeItRestores` (after a successful switch, a
+  later revert names the worktree it restores, not the launch worktree) in
   `internal/switcher/integration_test.go` (each asserts the shutdown
   signal is or is not triggered against the real process lifecycle);
   the hook-unit tests `TestRunUsesTheGivenWorktreeAsWorkingDirectory`,
@@ -747,8 +759,10 @@ with a fixed token, and no golden encodes the random value.
   `internal/hook/hook_test.go`; the startup-leg tests
   `TestStartupHookRunsBeforeTheInitialChildStart` (the child is gated on the
   hook's own work, so it can only boot if the hook ran first),
+  `TestStartupHookEnvironmentDescribesTheLaunchWorktree`,
   `TestFailingStartupHookRefusesToBoot` (non-zero exit, no child, nothing on the
-  internal port, no pidfile),
+  internal port, no pidfile), `TestRevertToTheLaunchWorktreeNamesIt` (the slug main
+  resolved at startup is the one a revert to that worktree reports),
   `TestListenerServesTheStartingPageDuringTheStartupHook`,
   `TestSignalDuringTheStartupHookStopsTheHook` (Ctrl-C mid-bootstrap kills the
   hook's group instead of orphaning it) and

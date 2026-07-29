@@ -266,6 +266,7 @@ func newIntHarnessHook(t *testing.T, switchHook string) *intHarness {
 		Worktrees:     realWorktrees{},
 		Health:        func(ctx context.Context) error { return portpkg.WaitTCP(ctx, addr, 20*time.Millisecond) },
 		Dir:           main,
+		Slug:          filepath.Base(main),
 		Logger:        log.New(io.Discard, "", 0),
 		HealthTimeout: 1500 * time.Millisecond,
 		Hook:          hook.New(hook.Config{Command: switchHook, Timeout: 10 * time.Second}),
@@ -585,6 +586,80 @@ func TestIntegrationRevertHookClearsStaleBlocker(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(h.main, "blocker")); !os.IsNotExist(err) {
 		t.Errorf("blocker still present in main worktree; the revert hook should have removed it (stat err = %v)", err)
+	}
+}
+
+// Contract 8: each leg tells the hook which worktree it is bootstrapping and
+// which one is being left, so one script can serve every leg. The target is made
+// unbootable so a single request produces both legs: the forward switch into the
+// target, then the revert to the worktree the child came from.
+func TestIntegrationSwitchHookEnvironmentPerLeg(t *testing.T) {
+	envLog := filepath.Join(t.TempDir(), "env.log")
+	h := newIntHarnessHook(t, `printf '%s|%s|%s|%s\n' "$MARQUEE_HOOK_LEG" "$MARQUEE_TARGET_SLUG" "$MARQUEE_TARGET_DIR" "$MARQUEE_PREV_DIR" >> `+envLog)
+	if err := os.Remove(filepath.Join(h.target, "boot-ok")); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := h.switchTo("feature", false); rec.Code/100 == 2 {
+		t.Fatalf("status = %d, want a non-2xx failure; body %s", rec.Code, rec.Body.String())
+	}
+	h.assertChildHealthy(t)
+
+	b, err := os.ReadFile(envLog)
+	if err != nil {
+		t.Fatalf("read hook env log: %v", err)
+	}
+	got := strings.Split(strings.TrimSpace(string(b)), "\n")
+	want := []string{
+		"switch|feature|" + h.target + "|" + h.main,
+		"revert|" + filepath.Base(h.main) + "|" + h.main + "|" + h.target,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("hook ran with %v, want one line per leg: %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("leg %d environment = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// Contract 9: after a successful switch, a later revert names the worktree it is
+// restoring, not the one marquee was launched in. The orchestrator has to carry
+// the slug of the worktree it switched into for that, so this is what keeps the
+// slug half of its bookkeeping honest.
+func TestIntegrationRevertNamesTheWorktreeItRestores(t *testing.T) {
+	envLog := filepath.Join(t.TempDir(), "env.log")
+	h := newIntHarnessHook(t, `printf '%s|%s\n' "$MARQUEE_HOOK_LEG" "$MARQUEE_TARGET_SLUG" >> `+envLog)
+
+	if rec := h.switchTo("feature", false); rec.Code != http.StatusOK {
+		t.Fatalf("first switch status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+
+	// The child now runs in the feature worktree. Make the worktree it came from
+	// unbootable so switching back fails and reverts to feature.
+	if err := os.Remove(filepath.Join(h.main, "boot-ok")); err != nil {
+		t.Fatal(err)
+	}
+	mainSlug := filepath.Base(h.main)
+	if rec := h.switchTo(mainSlug, true); rec.Code/100 == 2 {
+		t.Fatalf("second switch status = %d, want a non-2xx failure; body %s", rec.Code, rec.Body.String())
+	}
+	h.assertChildHealthy(t)
+
+	b, err := os.ReadFile(envLog)
+	if err != nil {
+		t.Fatalf("read hook env log: %v", err)
+	}
+	got := strings.Split(strings.TrimSpace(string(b)), "\n")
+	want := []string{"switch|feature", "switch|" + mainSlug, "revert|feature"}
+	if len(got) != len(want) {
+		t.Fatalf("hook ran as %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("hook run %d = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

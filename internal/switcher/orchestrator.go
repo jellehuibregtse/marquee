@@ -79,6 +79,14 @@ type Plan struct {
 	Dirty  bool
 }
 
+// worktree is a worktree the child can run in, named as git's worktree list
+// names it. The slug travels with the path because the switch hook is told which
+// worktree it is bootstrapping, on every leg.
+type worktree struct {
+	slug string
+	dir  string
+}
+
 // Transition is one phase change with the timestamp it happened. The timeline
 // of transitions for the last switch is the v2 performance-measurement hook.
 type Transition struct {
@@ -97,6 +105,9 @@ type OrchestratorConfig struct {
 	Health func(ctx context.Context) error
 	// Dir is the worktree the child starts in (marquee's launch cwd).
 	Dir string
+	// Slug names that worktree the way git's worktree list does, so the hook gets
+	// the same slug on a revert to it as a switch into it would have passed.
+	Slug string
 	// Logger receives operational messages. Defaults to log.Default().
 	Logger *log.Logger
 	// RestartTimeout bounds a single restart; defaults to 30s.
@@ -129,8 +140,11 @@ type Orchestrator struct {
 	healthTimeout  time.Duration
 	hook           *hook.Runner
 
-	mu         sync.Mutex
-	currentDir string
+	mu sync.Mutex
+	// current is the worktree the child is running in, named as git names it. Both
+	// halves travel together because the hook needs the slug of whatever worktree
+	// it is bootstrapping, including on the revert leg.
+	current worktree
 	// switching is true for the duration of a Switch. While it is set, the
 	// monitor never forwards an exit: the exit belongs to the switch.
 	switching bool
@@ -163,7 +177,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		worktrees:      cfg.Worktrees,
 		health:         cfg.Health,
 		logger:         cfg.Logger,
-		currentDir:     cfg.Dir,
+		current:        worktree{slug: cfg.Slug, dir: cfg.Dir},
 		restartTimeout: orDuration(cfg.RestartTimeout, 30*time.Second),
 		healthTimeout:  orDuration(cfg.HealthTimeout, 30*time.Second),
 		hook:           cfg.Hook,
@@ -221,7 +235,7 @@ func (o *Orchestrator) monitor() {
 // to the returned Plan before calling Switch.
 func (o *Orchestrator) Prepare(slug string) (Plan, error) {
 	o.mu.Lock()
-	dir := o.currentDir
+	dir := o.current.dir
 	o.mu.Unlock()
 
 	snap, err := o.worktrees.Collect(dir)
@@ -246,7 +260,7 @@ func (o *Orchestrator) Prepare(slug string) (Plan, error) {
 // switch mid-flight and strands the child.
 func (o *Orchestrator) Switch(ctx context.Context, plan Plan) Result {
 	o.mu.Lock()
-	prevDir := o.currentDir
+	prev := o.current
 	o.switching = true
 	o.timeline = o.timeline[:0]
 	o.mu.Unlock()
@@ -273,17 +287,23 @@ func (o *Orchestrator) Switch(ctx context.Context, plan Plan) Result {
 	// would be pointless work that can itself race its own teardown into a stale
 	// process-manager socket and leave the dev server dead after what was only a
 	// harmless hook failure.
-	if err := o.hook.Run(ctx, plan.Path); err != nil {
-		o.logf("switch to %q failed in switch-hook: %v; left the child running in %q untouched", plan.Slug, err, prevDir)
+	target := worktree{slug: plan.Slug, dir: plan.Path}
+	if err := o.hook.Run(ctx, hook.Invocation{
+		Leg:        hook.LegSwitch,
+		TargetSlug: target.slug,
+		TargetDir:  target.dir,
+		PrevDir:    prev.dir,
+	}); err != nil {
+		o.logf("switch to %q failed in switch-hook: %v; left the child running in %q untouched", plan.Slug, err, prev.dir)
 		result.Outcome = OutcomeHookFailedBeforeStart
 		return result
 	}
 
-	if err := o.switchInto(ctx, plan.Path, plan.Slug); err == nil {
+	if err := o.switchInto(ctx, target, plan.Slug); err == nil {
 		result.Outcome = OutcomeSuccess
 		return result
 	} else {
-		o.logf("switch to %q failed: %v; reverting to %q", plan.Slug, err, prevDir)
+		o.logf("switch to %q failed: %v; reverting to %q", plan.Slug, err, prev.dir)
 	}
 
 	// The forward attempt failed only after it had already stopped the old child,
@@ -292,8 +312,8 @@ func (o *Orchestrator) Switch(ctx context.Context, plan Plan) Result {
 	// dead-but-alive marquee the user can retry beats one that vanished); the
 	// response always reports the switch as a failure, never a fake success.
 	o.setPhase(switching.Reverting, plan.Slug)
-	if err := o.revertInto(ctx, prevDir, plan.Slug); err != nil {
-		o.logf("revert to %q also failed: %v", prevDir, err)
+	if err := o.revertInto(ctx, prev, target); err != nil {
+		o.logf("revert to %q also failed: %v", prev.dir, err)
 		result.Outcome = OutcomeBothFailed
 		return result
 	}
@@ -301,23 +321,25 @@ func (o *Orchestrator) Switch(ctx context.Context, plan Plan) Result {
 	return result
 }
 
-// switchInto restarts the child in dir and waits for it to become healthy. On
-// success it repoints the pollers and records dir as the current worktree; on
+// switchInto restarts the child in tgt and waits for it to become healthy. On
+// success it repoints the pollers and records tgt as the current worktree; on
 // failure (the restart could not start, or the child never became healthy) it
-// returns the error and leaves currentDir untouched so a revert restores it. It
-// deliberately does NOT run the switch hook: bootstrapping happens once, before
-// the child is stopped (see Switch), so a hook failure is handled there and
-// never reaches this restart step.
-func (o *Orchestrator) switchInto(ctx context.Context, dir, slug string) error {
+// returns the error and leaves the current worktree untouched so a revert
+// restores it. phaseSlug is what the interstitial shows, which on a revert is
+// still the target the user asked for rather than the worktree being restored.
+// switchInto deliberately does NOT run the switch hook: bootstrapping happens
+// once, before the child is stopped (see Switch), so a hook failure is handled
+// there and never reaches this restart step.
+func (o *Orchestrator) switchInto(ctx context.Context, tgt worktree, phaseSlug string) error {
 	rctx, cancel := context.WithTimeout(ctx, o.restartTimeout)
 	defer cancel()
-	if err := o.child.Restart(rctx, dir); err != nil {
+	if err := o.child.Restart(rctx, tgt.dir); err != nil {
 		return err
 	}
-	o.setPhase(switching.Booting, slug)
+	o.setPhase(switching.Booting, phaseSlug)
 
 	if o.health != nil {
-		o.setPhase(switching.Probing, slug)
+		o.setPhase(switching.Probing, phaseSlug)
 		hctx, hcancel := context.WithTimeout(ctx, o.healthTimeout)
 		err := o.health(hctx)
 		hcancel()
@@ -333,13 +355,13 @@ func (o *Orchestrator) switchInto(ctx context.Context, dir, slug string) error {
 	// a failure (and reverts) rather than a fake success that later shuts marquee
 	// down.
 	if !o.child.Alive() {
-		return fmt.Errorf("child exited before becoming healthy in %s", dir)
+		return fmt.Errorf("child exited before becoming healthy in %s", tgt.dir)
 	}
 
 	o.mu.Lock()
-	o.currentDir = dir
+	o.current = tgt
 	o.mu.Unlock()
-	o.worktrees.Repoint(dir)
+	o.worktrees.Repoint(tgt.dir)
 	return nil
 }
 
@@ -357,11 +379,16 @@ func (o *Orchestrator) switchInto(ctx context.Context, dir, slug string) error {
 // so recovery still attempts the restart rather than stranding the user on a
 // spurious hook error — if the restart then fails, the both-failed path reports
 // it honestly.
-func (o *Orchestrator) revertInto(ctx context.Context, dir, slug string) error {
-	if err := o.hook.Run(ctx, dir); err != nil {
-		o.logf("revert switch-hook in %q failed; restarting the previously-working worktree anyway: %v", dir, err)
+func (o *Orchestrator) revertInto(ctx context.Context, prev, failed worktree) error {
+	if err := o.hook.Run(ctx, hook.Invocation{
+		Leg:        hook.LegRevert,
+		TargetSlug: prev.slug,
+		TargetDir:  prev.dir,
+		PrevDir:    failed.dir,
+	}); err != nil {
+		o.logf("revert switch-hook in %q failed; restarting the previously-working worktree anyway: %v", prev.dir, err)
 	}
-	return o.switchInto(ctx, dir, slug)
+	return o.switchInto(ctx, prev, failed.slug)
 }
 
 // setPhase records a phase transition (with its timestamp, for timing) and

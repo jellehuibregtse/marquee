@@ -32,10 +32,16 @@ func (r *recorder) joined() string {
 	return strings.Join(r.lines, "\n")
 }
 
+// in builds the minimal invocation for the tests that only care about where the
+// hook runs, not about which leg it belongs to.
+func in(dir string) hook.Invocation {
+	return hook.Invocation{Leg: hook.LegStart, TargetSlug: filepath.Base(dir), TargetDir: dir}
+}
+
 func TestRunUsesTheGivenWorktreeAsWorkingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	r := hook.New(hook.Config{Command: "echo hooked > marker"})
-	if err := r.Run(context.Background(), dir); err != nil {
+	if err := r.Run(context.Background(), in(dir)); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "marker")); err != nil {
@@ -45,7 +51,7 @@ func TestRunUsesTheGivenWorktreeAsWorkingDirectory(t *testing.T) {
 
 func TestRunReportsANonZeroExit(t *testing.T) {
 	r := hook.New(hook.Config{Command: "exit 3"})
-	err := r.Run(context.Background(), t.TempDir())
+	err := r.Run(context.Background(), in(t.TempDir()))
 	if err == nil {
 		t.Fatal("Run returned nil for a hook that exited 3")
 	}
@@ -59,11 +65,11 @@ func TestRunReportsANonZeroExit(t *testing.T) {
 // relies on.
 func TestUnconfiguredHookIsANoOp(t *testing.T) {
 	dir := t.TempDir()
-	if err := hook.New(hook.Config{}).Run(context.Background(), dir); err != nil {
+	if err := hook.New(hook.Config{}).Run(context.Background(), in(dir)); err != nil {
 		t.Fatalf("empty hook: %v", err)
 	}
 	var nilRunner *hook.Runner
-	if err := nilRunner.Run(context.Background(), dir); err != nil {
+	if err := nilRunner.Run(context.Background(), in(dir)); err != nil {
 		t.Fatalf("nil hook: %v", err)
 	}
 	if nilRunner.Configured() || hook.New(hook.Config{}).Configured() {
@@ -88,7 +94,7 @@ func TestTimeoutKillsTheWholeHookProcessGroup(t *testing.T) {
 	r := hook.New(hook.Config{Command: "sh -c 'sleep 5; touch " + marker + "' & wait", Timeout: 200 * time.Millisecond})
 
 	start := time.Now()
-	err := r.Run(context.Background(), dir)
+	err := r.Run(context.Background(), in(dir))
 	if err == nil {
 		t.Fatal("Run returned nil for a hook that timed out")
 	}
@@ -105,7 +111,7 @@ func TestTimeoutKillsTheWholeHookProcessGroup(t *testing.T) {
 func TestOutputIsStreamedToTheLoggerLineByLine(t *testing.T) {
 	var rec recorder
 	r := hook.New(hook.Config{Command: "echo first; echo second >&2; printf trailing", Logf: rec.logf})
-	if err := r.Run(context.Background(), t.TempDir()); err != nil {
+	if err := r.Run(context.Background(), in(t.TempDir())); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	got := rec.joined()
@@ -125,12 +131,77 @@ func TestParentCancellationStopsTheHook(t *testing.T) {
 		cancel()
 	}()
 	start := time.Now()
-	err := hook.New(hook.Config{Command: "sleep 5"}).Run(ctx, t.TempDir())
+	err := hook.New(hook.Config{Command: "sleep 5"}).Run(ctx, in(t.TempDir()))
 	if err == nil {
 		t.Fatal("Run returned nil for a hook cancelled mid-flight")
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("Run took %s, want the cancellation to cut it short", elapsed)
+	}
+}
+
+// The hook is told which worktree it is bootstrapping and which one is being
+// left, through its environment, so a single script can serve all three legs.
+func TestInvocationIsExportedToTheHookEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	dump := filepath.Join(dir, "env")
+	r := hook.New(hook.Config{Command: `{ echo "$MARQUEE_HOOK_LEG"; echo "$MARQUEE_TARGET_SLUG"; echo "$MARQUEE_TARGET_DIR"; echo "[$MARQUEE_PREV_DIR]"; } > ` + dump})
+
+	inv := hook.Invocation{Leg: hook.LegRevert, TargetSlug: "main", TargetDir: dir, PrevDir: "/repo/feature"}
+	if err := r.Run(context.Background(), inv); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	b, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(strings.TrimSpace(string(b)), "\n")
+	want := []string{"revert", "main", dir, "[/repo/feature]"}
+	if len(got) != len(want) {
+		t.Fatalf("hook saw %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// The initial start has no previous worktree, so MARQUEE_PREV_DIR is set but
+// empty: a hook can test it rather than guess whether the variable exists.
+func TestPrevDirIsEmptyOnTheStartLeg(t *testing.T) {
+	dir := t.TempDir()
+	dump := filepath.Join(dir, "env")
+	r := hook.New(hook.Config{Command: `{ echo "${MARQUEE_PREV_DIR-unset}"; echo "$MARQUEE_HOOK_LEG"; } > ` + dump})
+	if err := r.Run(context.Background(), hook.Invocation{Leg: hook.LegStart, TargetSlug: "main", TargetDir: dir}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	b, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); got != "\nstart\n" {
+		t.Errorf("hook saw %q, want an empty MARQUEE_PREV_DIR and leg %q", got, "start")
+	}
+}
+
+// The hook keeps the environment marquee itself was launched with; the MARQUEE_*
+// entries are additions, not a replacement.
+func TestHookInheritsTheParentEnvironment(t *testing.T) {
+	t.Setenv("MARQUEE_HOOK_TEST_INHERITED", "yes")
+	dir := t.TempDir()
+	dump := filepath.Join(dir, "env")
+	r := hook.New(hook.Config{Command: `echo "$MARQUEE_HOOK_TEST_INHERITED" > ` + dump})
+	if err := r.Run(context.Background(), in(dir)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	b, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(b)) != "yes" {
+		t.Errorf("hook did not inherit the parent environment: %q", b)
 	}
 }
 
@@ -144,7 +215,7 @@ func TestFailureIsRepeatedThroughTheErrorSink(t *testing.T) {
 		Logf:    progress.logf,
 		Errf:    failure.logf,
 	})
-	if err := r.Run(context.Background(), t.TempDir()); err == nil {
+	if err := r.Run(context.Background(), in(t.TempDir())); err == nil {
 		t.Fatal("Run returned nil for a hook that exited 4")
 	}
 	if got := failure.joined(); !strings.Contains(got, "REASON") {
@@ -160,7 +231,7 @@ func TestFailureIsRepeatedThroughTheErrorSink(t *testing.T) {
 func TestSuccessIsSilentOnTheErrorSink(t *testing.T) {
 	var failure recorder
 	r := hook.New(hook.Config{Command: "echo fine", Errf: failure.logf})
-	if err := r.Run(context.Background(), t.TempDir()); err != nil {
+	if err := r.Run(context.Background(), in(t.TempDir())); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if got := failure.joined(); got != "" {
@@ -176,7 +247,7 @@ func TestFailureTailIsCapped(t *testing.T) {
 		Command: "for i in $(seq 1 400); do echo line-$i; done; echo REASON >&2; exit 1",
 		Errf:    failure.logf,
 	})
-	if err := r.Run(context.Background(), t.TempDir()); err == nil {
+	if err := r.Run(context.Background(), in(t.TempDir())); err == nil {
 		t.Fatal("Run returned nil for a hook that exited 1")
 	}
 	failure.mu.Lock()

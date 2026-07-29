@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -43,6 +44,18 @@ type worktrees struct {
 
 func (w worktrees) Collect(dir string) (gitinfo.Snapshot, error) { return gitinfo.Collect(dir) }
 func (w worktrees) Repoint(dir string)                           { w.repoint(dir) }
+
+// worktreeSlug names the worktree dir belongs to the way the switcher names one:
+// the base of git's own worktree root, so a hook run at startup gets the same
+// slug a switch into that worktree would pass. Outside a git repo (or with git
+// unavailable) it falls back to the directory's own name, which is all a slug
+// ever is.
+func worktreeSlug(dir string) string {
+	if snap, err := gitinfo.Collect(dir); err == nil && snap.Worktree.Slug != "" {
+		return snap.Worktree.Slug
+	}
+	return filepath.Base(dir)
+}
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "attach" {
@@ -129,7 +142,12 @@ func run() int {
 		Logf:    func(format string, args ...any) { log.Info(format, args...) },
 		Errf:    func(format string, args ...any) { log.Error(format, args...) },
 	})
-
+	// The hook is the only consumer of the launch worktree's slug, so asking git
+	// for it is only worth a subprocess when there is a hook to receive it.
+	launchSlug := ""
+	if switchHook.Configured() {
+		launchSlug = worktreeSlug(workdir)
+	}
 	git := gitinfo.Start(workdir, 2*time.Second, nil)
 	defer git.Stop()
 	gh := ghinfo.New(workdir)
@@ -168,6 +186,7 @@ func run() int {
 		Worktrees: worktrees{repoint: func(dir string) { git.Repoint(dir); gh.Repoint(dir) }},
 		Health:    func(ctx context.Context) error { return port.WaitTCP(ctx, healthAddr, 0) },
 		Dir:       workdir,
+		Slug:      launchSlug,
 		Hook:      switchHook,
 	})
 	if switchToken != "" {
@@ -196,7 +215,13 @@ func run() int {
 	hookCtx, cancelHook := context.WithCancel(context.Background())
 	defer cancelHook()
 	hookErr := make(chan error, 1)
-	go func() { hookErr <- switchHook.Run(hookCtx, workdir) }()
+	go func() {
+		hookErr <- switchHook.Run(hookCtx, hook.Invocation{
+			Leg:        hook.LegStart,
+			TargetSlug: launchSlug,
+			TargetDir:  workdir,
+		})
+	}()
 	select {
 	case err := <-hookErr:
 		if err != nil {

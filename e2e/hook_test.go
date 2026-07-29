@@ -42,6 +42,55 @@ func TestStartupHookRunsBeforeTheInitialChildStart(t *testing.T) {
 	}
 }
 
+// The startup leg identifies itself in the hook's environment: leg "start", the
+// launch worktree as git names it, and an empty MARQUEE_PREV_DIR because nothing
+// was running yet.
+func TestStartupHookEnvironmentDescribesTheLaunchWorktree(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := makeFixtureRepo(repo); err != nil {
+		t.Fatalf("build repo: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proc, err := startMarqueeWith(repo,
+		[]string{"--switch-hook", `printf '%s|%s|%s|[%s]' "$MARQUEE_HOOK_LEG" "$MARQUEE_TARGET_SLUG" "$MARQUEE_TARGET_DIR" "$MARQUEE_PREV_DIR" > hook-env`},
+		[]string{upstreamBin},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proc.stop() })
+	if err := proc.waitHealthy(15 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(repo, "hook-env"))
+	if err != nil {
+		t.Fatalf("read hook env: %v", err)
+	}
+	fields := strings.Split(string(b), "|")
+	if len(fields) != 4 {
+		t.Fatalf("hook environment = %q, want four fields", b)
+	}
+	if fields[0] != "start" {
+		t.Errorf("MARQUEE_HOOK_LEG = %q, want %q", fields[0], "start")
+	}
+	if fields[1] != filepath.Base(resolved) {
+		t.Errorf("MARQUEE_TARGET_SLUG = %q, want %q", fields[1], filepath.Base(resolved))
+	}
+	// The dir is compared through EvalSymlinks because a temp path can reach the
+	// child by either its symlinked or its real name.
+	if got, err := filepath.EvalSymlinks(fields[2]); err != nil || got != resolved {
+		t.Errorf("MARQUEE_TARGET_DIR = %q (resolves to %q, err %v), want the launch worktree %q", fields[2], got, err, resolved)
+	}
+	if fields[3] != "[]" {
+		t.Errorf("MARQUEE_PREV_DIR = %q, want it empty on the initial start", strings.Trim(fields[3], "[]"))
+	}
+}
+
 // A failing hook at startup refuses the boot: marquee exits non-zero, the child
 // is never started, and no pidfile is left behind claiming a child that does not
 // exist. This mirrors a switch whose hook fails before anything moved.
@@ -82,6 +131,69 @@ func TestFailingStartupHookRefusesToBoot(t *testing.T) {
 	if path := pidfileFor(t, proc.addr); path != "" {
 		if _, err := os.Stat(path); err == nil {
 			t.Errorf("pidfile %s left behind by a boot that never started a child", path)
+		}
+	}
+}
+
+// A revert to the launch worktree names it, which is only true if the slug main
+// resolved at startup reached the orchestrator. The target worktree is made
+// unbootable so one request produces the forward leg and the revert.
+func TestRevertToTheLaunchWorktreeNamesIt(t *testing.T) {
+	tmp := t.TempDir()
+	mainWt := filepath.Join(tmp, "main")
+	featureWt := filepath.Join(tmp, "feature")
+	if err := makeSwitchRepo(mainWt, featureWt, "marquee-e2e-revert-slug"); err != nil {
+		t.Fatalf("build repo: %v", err)
+	}
+	// The child only boots where app.txt is present, so removing it from the
+	// target makes the forward switch fail its boot and revert.
+	if err := os.Remove(filepath.Join(featureWt, "app.txt")); err != nil {
+		t.Fatal(err)
+	}
+	envLog := filepath.Join(tmp, "env.log")
+
+	proc, err := startMarqueeWith(mainWt,
+		[]string{"--switch-hook", `printf '%s|%s\n' "$MARQUEE_HOOK_LEG" "$MARQUEE_TARGET_SLUG" >> ` + envLog},
+		[]string{"sh", "-c", "test -f app.txt && exec " + upstreamBin},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proc.stop() })
+	if err := proc.waitHealthy(15 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	token := switchToken(t, proc.baseURL)
+	req, err := http.NewRequest(http.MethodPost, proc.baseURL+"/__marquee/switch", strings.NewReader(`{"slug":"feature","confirm":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = proc.addr
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", proc.baseURL)
+	req.Header.Set("X-Marquee-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode/100 == 2 {
+		t.Fatalf("switch status = %d, want a failure: the target cannot boot", resp.StatusCode)
+	}
+
+	b, err := os.ReadFile(envLog)
+	if err != nil {
+		t.Fatalf("read hook env log: %v", err)
+	}
+	got := strings.Split(strings.TrimSpace(string(b)), "\n")
+	want := []string{"start|main", "switch|feature", "revert|main"}
+	if len(got) != len(want) {
+		t.Fatalf("hook ran as %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("hook run %d = %q, want %q", i, got[i], want[i])
 		}
 	}
 }

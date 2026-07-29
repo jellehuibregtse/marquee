@@ -143,6 +143,11 @@ type OrchestratorConfig struct {
 	// is CLI input, never request- or slug-derived. Empty disables it. See
 	// docs/security.md, Threat 4.
 	ReadyCmd string
+	// WorktreeFilter narrows git's worktree set to the operator's switch targets.
+	// Its zero value keeps all of them. Prepare applies it itself rather than
+	// trusting whoever filtered the list the bar was offered, so a hand-made
+	// request for a filtered-out slug is rejected like any unknown slug.
+	WorktreeFilter gitinfo.WorktreeFilter
 }
 
 // readyRetryInterval is how long to wait between attempts of ReadyCmd. A stack
@@ -170,6 +175,7 @@ type Orchestrator struct {
 	healthTimeout  time.Duration
 	hook           *hook.Runner
 	readyCmd       string
+	worktreeFilter gitinfo.WorktreeFilter
 
 	mu sync.Mutex
 	// current is the worktree the child is running in, named as git names it. Both
@@ -213,6 +219,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		healthTimeout:  orDuration(cfg.HealthTimeout, DefaultHealthTimeout),
 		hook:           cfg.Hook,
 		readyCmd:       cfg.ReadyCmd,
+		worktreeFilter: cfg.WorktreeFilter,
 		terminated:     make(chan struct{}),
 	}
 	if o.logger == nil {
@@ -276,12 +283,16 @@ func (o *Orchestrator) Prepare(slug string) (Plan, error) {
 	}
 	// The slug is only ever an exact-match key into git's own worktree list; the
 	// absolute path comes from git's output, never from the request. An unknown
-	// slug or any traversal shape simply fails to match.
-	target, ok := resolveWorktree(snap.Worktrees, slug)
+	// slug or any traversal shape simply fails to match. The lookup runs over the
+	// operator's filtered target set, so a worktree the operator excluded is as
+	// unresolvable as one that does not exist, whatever the request asks for. The
+	// main worktree survives every filter, so switching back is always possible.
+	targets := o.worktreeFilter.Apply(snap.Worktrees)
+	target, ok := resolveWorktree(targets, slug)
 	if !ok {
 		return Plan{}, ErrUnknownSlug
 	}
-	targetIsMain := len(snap.Worktrees) > 0 && target.Path == snap.Worktrees[0].Path
+	targetIsMain := len(targets) > 0 && target.Path == targets[0].Path
 	return Plan{Slug: target.Slug, Path: target.Path, IsMain: targetIsMain, Dirty: snap.Dirty}, nil
 }
 

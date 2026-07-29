@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jellehuibregtse/marquee/internal/gitinfo"
 	"github.com/jellehuibregtse/marquee/internal/hook"
 	"github.com/jellehuibregtse/marquee/internal/knob"
 	"github.com/jellehuibregtse/marquee/internal/switcher"
@@ -84,6 +85,8 @@ type options struct {
 	keepCSP        bool
 	switchHook     string
 	readyCmd       string
+	worktreeGlobs  []string
+	worktreeFilter gitinfo.WorktreeFilter
 	hookTimeout    time.Duration
 	healthTimeout  time.Duration
 	restartTimeout time.Duration
@@ -119,6 +122,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen, exposing the proxy to the network")
 	fs.BoolVar(&opts.keepCSP, "keep-csp", false, "leave the app's Content-Security-Policy untouched (the bar may not load if its CSP forbids same-origin scripts)")
 	fs.StringVar(&opts.switchHook, "switch-hook", "", "command run in a worktree before the child starts there, including at startup in the worktree marquee is launched in (e.g. \"bundle install\"); empty disables it")
+	fs.Var((*stringList)(&opts.worktreeGlobs), "worktree-glob", "glob matched against a worktree's absolute path; when given, only matching worktrees (plus the main one) are switch targets (repeatable)")
 	fs.StringVar(&opts.readyCmd, "ready-cmd", "", "command retried in the target worktree after the child's port answers, until it exits 0 or --health-timeout expires (e.g. \"curl -sf localhost:3036\"); empty disables it")
 	fs.DurationVar(&opts.hookTimeout, "hook-timeout", hook.DefaultTimeout, "how long --switch-hook may run on any leg before its process group is killed, e.g. 20m")
 	fs.DurationVar(&opts.healthTimeout, "health-timeout", switcher.DefaultHealthTimeout, "how long to wait for a restarted child to become healthy before the switch reverts, e.g. 90s")
@@ -152,6 +156,12 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 		return nil, errUsage
 	}
 	opts.pills = pills
+	filter, err := gitinfo.NewWorktreeFilter(opts.worktreeGlobs)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --worktree-glob: %v\n", err)
+		return nil, errUsage
+	}
+	opts.worktreeFilter = filter
 	for _, tf := range []struct {
 		name  string
 		value time.Duration

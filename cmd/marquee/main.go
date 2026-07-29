@@ -57,6 +57,49 @@ func worktreeSlug(dir string) string {
 	return filepath.Base(dir)
 }
 
+// filterWorktrees narrows a snapshot's worktree list to the operator's switch
+// targets before the bar ever sees it, so the picker offers only what a switch
+// would accept. The switch endpoint filters again on its own (see
+// OrchestratorConfig.WorktreeFilter); this one is about what is on offer.
+func filterWorktrees(snap gitinfo.Snapshot, filter gitinfo.WorktreeFilter) gitinfo.Snapshot {
+	snap.Worktrees = filter.Apply(snap.Worktrees)
+	return snap
+}
+
+// reportSwitchTargets prints the worktrees --worktree-glob left switchable. A
+// glob is easy to get subtly wrong (a shape that doesn't match, a path form git
+// reports differently), and without this the only symptom is a picker that
+// quietly lost entries.
+func reportSwitchTargets(dir string, filter gitinfo.WorktreeFilter, log *logger) {
+	snap, err := gitinfo.Collect(dir)
+	if err != nil {
+		log.Warn("could not read the worktree list to report the switch targets: %v", err)
+		return
+	}
+	info, warn := switchTargetLines(snap.Worktrees, filter.Apply(snap.Worktrees))
+	log.Info("%s", info)
+	if warn != "" {
+		log.Warn("%s", warn)
+	}
+}
+
+// switchTargetLines renders the target set for the log, plus the warning for a
+// glob that matched nothing: the traps behind that are all path-shaped, so the
+// message names them instead of leaving the operator to guess.
+func switchTargetLines(all, targets []gitinfo.Worktree) (info, warn string) {
+	slugs := make([]string, 0, len(targets))
+	for _, wt := range targets {
+		slugs = append(slugs, wt.Slug)
+	}
+	info = fmt.Sprintf("switch targets (%d of %d worktrees): %s", len(targets), len(all), strings.Join(slugs, ", "))
+	if len(targets) > 1 {
+		return info, ""
+	}
+	return info, "--worktree-glob matched no worktree beyond the main one, so the bar shows no switcher at all; " +
+		"note that a glob matches the path git reports (the resolved one, e.g. /private/tmp/... on macOS), " +
+		"that * never crosses a /, and that matching is case-sensitive"
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "attach" {
 		os.Exit(runAttach(os.Args[2:]))
@@ -154,6 +197,10 @@ func run() int {
 	gh := ghinfo.New(workdir)
 	defer gh.Stop()
 
+	if len(opts.worktreeGlobs) > 0 {
+		reportSwitchTargets(workdir, opts.worktreeFilter, log)
+	}
+
 	// The worktree switcher's CSRF token is minted once per process with
 	// crypto/rand. If minting fails we run without a token: the switch
 	// endpoint then rejects every request and the bar hides its switcher,
@@ -166,7 +213,7 @@ func run() int {
 
 	handler := proxy.New(proxy.Config{InternalPort: internalPort, AllowHosts: opts.allowHosts, RelaxCSP: !opts.keepCSP, SwitchToken: switchToken})
 	status.Register(handler.Internal(), status.Deps{
-		Git:        git.Snapshot,
+		Git:        func() gitinfo.Snapshot { return filterWorktrees(git.Snapshot(), opts.worktreeFilter) },
 		PR:         gh.PR,
 		ChildState: func() string { return string(child.Status().State) },
 		Position:   opts.position,
@@ -190,6 +237,7 @@ func run() int {
 		Slug:           launchSlug,
 		Hook:           switchHook,
 		ReadyCmd:       opts.readyCmd,
+		WorktreeFilter: opts.worktreeFilter,
 		HealthTimeout:  opts.healthTimeout,
 		RestartTimeout: opts.restartTimeout,
 	})

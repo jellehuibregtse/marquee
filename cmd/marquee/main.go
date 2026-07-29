@@ -139,6 +139,7 @@ func run() int {
 	// anything has moved: nothing is started, so there is nothing to recover.
 	switchHook := hook.New(hook.Config{
 		Command: opts.switchHook,
+		Timeout: opts.hookTimeout,
 		Logf:    func(format string, args ...any) { log.Info(format, args...) },
 		Errf:    func(format string, args ...any) { log.Error(format, args...) },
 	})
@@ -182,12 +183,14 @@ func run() int {
 	// the orchestrator simply forwards a dying child outward as before.
 	healthAddr := fmt.Sprintf("127.0.0.1:%d", internalPort)
 	orch := switcher.NewOrchestrator(switcher.OrchestratorConfig{
-		Child:     child,
-		Worktrees: worktrees{repoint: func(dir string) { git.Repoint(dir); gh.Repoint(dir) }},
-		Health:    func(ctx context.Context) error { return port.WaitTCP(ctx, healthAddr, 0) },
-		Dir:       workdir,
-		Slug:      launchSlug,
-		Hook:      switchHook,
+		Child:          child,
+		Worktrees:      worktrees{repoint: func(dir string) { git.Repoint(dir); gh.Repoint(dir) }},
+		Health:         func(ctx context.Context) error { return port.WaitTCP(ctx, healthAddr, 0) },
+		Dir:            workdir,
+		Slug:           launchSlug,
+		Hook:           switchHook,
+		HealthTimeout:  opts.healthTimeout,
+		RestartTimeout: opts.restartTimeout,
 	})
 	if switchToken != "" {
 		sw := switcher.New(switcher.Config{Token: switchToken, Orchestrator: orch})

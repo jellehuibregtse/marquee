@@ -41,6 +41,17 @@ type Worktrees interface {
 // one worktree in git's live worktree set.
 var ErrUnknownSlug = errors.New("slug is not a known worktree")
 
+// The switch's timeout defaults. They live here, beside the orchestrator that
+// falls back to them, so the CLI flags that override them cannot drift from the
+// values a caller gets by leaving the config field zero. The hook's own default
+// belongs to the hook (hook.DefaultTimeout), which owns that run.
+const (
+	// DefaultRestartTimeout bounds a single stop-and-spawn of the child.
+	DefaultRestartTimeout = 30 * time.Second
+	// DefaultHealthTimeout bounds the post-restart readiness gate.
+	DefaultHealthTimeout = 30 * time.Second
+)
+
 // Outcome classifies how a switch ended, so the HTTP layer can render the exact
 // status and body without knowing the switch's internal decisions.
 type Outcome int
@@ -178,8 +189,8 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		health:         cfg.Health,
 		logger:         cfg.Logger,
 		current:        worktree{slug: cfg.Slug, dir: cfg.Dir},
-		restartTimeout: orDuration(cfg.RestartTimeout, 30*time.Second),
-		healthTimeout:  orDuration(cfg.HealthTimeout, 30*time.Second),
+		restartTimeout: orDuration(cfg.RestartTimeout, DefaultRestartTimeout),
+		healthTimeout:  orDuration(cfg.HealthTimeout, DefaultHealthTimeout),
 		hook:           cfg.Hook,
 		terminated:     make(chan struct{}),
 	}

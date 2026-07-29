@@ -5,6 +5,10 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jellehuibregtse/marquee/internal/hook"
+	"github.com/jellehuibregtse/marquee/internal/switcher"
 )
 
 func TestParseArgsDefaults(t *testing.T) {
@@ -213,6 +217,62 @@ func TestParseArgsDuplicatePill(t *testing.T) {
 		if !strings.Contains(out, id) {
 			t.Errorf("error message does not list %q: %q", id, out)
 		}
+	}
+}
+
+func TestParseArgsSwitchTimeoutDefaults(t *testing.T) {
+	opts, err := parseArgs("marquee", []string{"--", "bin/dev"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if opts.hookTimeout != hook.DefaultTimeout {
+		t.Errorf("hookTimeout = %s, want %s", opts.hookTimeout, hook.DefaultTimeout)
+	}
+	if opts.healthTimeout != switcher.DefaultHealthTimeout {
+		t.Errorf("healthTimeout = %s, want %s", opts.healthTimeout, switcher.DefaultHealthTimeout)
+	}
+	if opts.restartTimeout != switcher.DefaultRestartTimeout {
+		t.Errorf("restartTimeout = %s, want %s", opts.restartTimeout, switcher.DefaultRestartTimeout)
+	}
+}
+
+func TestParseArgsSwitchTimeoutsCaptured(t *testing.T) {
+	opts, err := parseArgs("marquee",
+		[]string{"--hook-timeout", "25m", "--health-timeout", "90s", "--restart-timeout", "1m30s",
+			"--", "bin/dev"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if opts.hookTimeout != 25*time.Minute {
+		t.Errorf("hookTimeout = %s, want 25m", opts.hookTimeout)
+	}
+	if opts.healthTimeout != 90*time.Second {
+		t.Errorf("healthTimeout = %s, want 90s", opts.healthTimeout)
+	}
+	if opts.restartTimeout != 90*time.Second {
+		t.Errorf("restartTimeout = %s, want 1m30s", opts.restartTimeout)
+	}
+}
+
+func TestParseArgsRejectsNonPositiveSwitchTimeouts(t *testing.T) {
+	for _, flagName := range []string{"--hook-timeout", "--health-timeout", "--restart-timeout"} {
+		for _, value := range []string{"0", "0s", "-1s"} {
+			var buf bytes.Buffer
+			_, err := parseArgs("marquee", []string{flagName, value, "--", "bin/dev"}, &buf)
+			if err == nil {
+				t.Fatalf("parseArgs accepted %s %s", flagName, value)
+			}
+			if out := buf.String(); !strings.Contains(out, "invalid "+flagName) {
+				t.Errorf("%s %s: missing error message: %q", flagName, value, out)
+			}
+		}
+	}
+}
+
+func TestParseArgsRejectsUnparseableSwitchTimeout(t *testing.T) {
+	var buf bytes.Buffer
+	if _, err := parseArgs("marquee", []string{"--hook-timeout", "20", "--", "bin/dev"}, &buf); err == nil {
+		t.Fatal("parseArgs accepted a unitless --hook-timeout")
 	}
 }
 

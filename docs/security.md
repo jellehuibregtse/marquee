@@ -209,6 +209,14 @@ letting the request choose a path:
   empty), simply matches no worktree slug and is rejected with **400 and no
   process action**. An ambiguous duplicate slug (more than one match) is
   likewise rejected — the switch never acts on an unresolved target.
+- **The operator can narrow the lookup table itself.** With one or more
+  `--worktree-glob` patterns, `Prepare` resolves the slug against the filtered
+  target set (`gitinfo.WorktreeFilter`), so a worktree the operator excluded is
+  as unresolvable as one that does not exist and gets the same 400
+  `unknown_slug` with no process action. `Prepare` applies the filter itself
+  rather than trusting the list the bar was offered, so a hand-made request
+  cannot reach an excluded worktree. The main worktree is never filtered away:
+  switching back to it is the escape hatch out of a dirty or broken worktree.
 - **No path-join, no `filepath.Clean`-and-use, no stat of a request-derived
   path, no shell.** The slug is never concatenated with a base directory,
   never cleaned into a path, never passed to a shell. The runner's spawn is
@@ -283,8 +291,16 @@ hardened against corrupt input: see Threat 7's pidfile note.
   `cwd` is the target worktree) and
   `TestReadyCmdHangKillsItsProcessGroup` (a readiness command that hangs after
   spawning a background grandchild is killed at the health timeout **and** the
-  grandchild goes with it, so the group kill is proven rather than asserted) in
-  `internal/switcher/switcher_test.go`.
+  grandchild goes with it, so the group kill is proven rather than asserted),
+  `TestFilteredOutSlugRejectedNoProcessAction` (a slug excluded by
+  `--worktree-glob` gets 400 `unknown_slug` with no restart and no repoint) and
+  `TestMainIsAlwaysASwitchTargetDespiteFilter` (no glob can block the switch back
+  to main) in `internal/switcher/switcher_test.go`;
+  `TestSwitchRejectsAGlobbedOutWorktree` in `e2e/switch_test.go` (the real binary
+  under `--worktree-glob`: the excluded worktree is neither offered in the status
+  payload nor switchable over HTTP, and the child's process set is unchanged
+  afterwards, which is what proves `cmd/marquee` hands the filter to the
+  orchestrator and not only to the bar).
 
 ## Threat 5 — Malicious / compromised upstream responses
 

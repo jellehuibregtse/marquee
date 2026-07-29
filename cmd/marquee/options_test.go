@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jellehuibregtse/marquee/internal/gitinfo"
 	"github.com/jellehuibregtse/marquee/internal/hook"
 	"github.com/jellehuibregtse/marquee/internal/switcher"
 )
@@ -217,6 +218,48 @@ func TestParseArgsDuplicatePill(t *testing.T) {
 		if !strings.Contains(out, id) {
 			t.Errorf("error message does not list %q: %q", id, out)
 		}
+	}
+}
+
+func TestParseArgsWorktreeGlobRepeatable(t *testing.T) {
+	opts, err := parseArgs("marquee",
+		[]string{"--worktree-glob", "/code/*", "--worktree-glob", "/tmp/wt/*", "--", "bin/dev"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if got, want := strings.Join(opts.worktreeGlobs, ","), "/code/*,/tmp/wt/*"; got != want {
+		t.Errorf("worktreeGlobs = %q, want %q", got, want)
+	}
+	// The parsed filter is what main wires in, so it must reflect the globs: the
+	// main worktree (git lists it first) plus whatever matched.
+	kept := opts.worktreeFilter.Apply([]gitinfo.Worktree{
+		{Slug: "main", Path: "/repo"},
+		{Slug: "feature", Path: "/code/feature"},
+		{Slug: "demo", Path: "/elsewhere/demo"},
+	})
+	if len(kept) != 2 || kept[0].Slug != "main" || kept[1].Slug != "feature" {
+		t.Errorf("filter kept %v, want main and feature", kept)
+	}
+}
+
+func TestParseArgsNoWorktreeGlobKeepsEveryWorktree(t *testing.T) {
+	opts, err := parseArgs("marquee", []string{"--", "bin/dev"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	all := []gitinfo.Worktree{{Slug: "main", Path: "/repo"}, {Slug: "demo", Path: "/elsewhere/demo"}}
+	if got := opts.worktreeFilter.Apply(all); len(got) != len(all) {
+		t.Errorf("filter kept %v, want all %v", got, all)
+	}
+}
+
+func TestParseArgsInvalidWorktreeGlob(t *testing.T) {
+	var buf bytes.Buffer
+	if _, err := parseArgs("marquee", []string{"--worktree-glob", "/code/[a-", "--", "bin/dev"}, &buf); err == nil {
+		t.Fatal("parseArgs accepted a malformed --worktree-glob")
+	}
+	if out := buf.String(); !strings.Contains(out, "invalid --worktree-glob") {
+		t.Errorf("missing error message: %q", out)
 	}
 }
 

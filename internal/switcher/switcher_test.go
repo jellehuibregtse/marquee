@@ -179,6 +179,7 @@ type harnessOpts struct {
 	readyCmd      string
 	healthTimeout time.Duration
 	dir           string
+	globs         []string
 }
 
 func newHarness(t *testing.T, opts harnessOpts) *harness {
@@ -195,15 +196,20 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 	if dir == "" {
 		dir = "/repo/main"
 	}
+	filter, err := gitinfo.NewWorktreeFilter(opts.globs)
+	if err != nil {
+		t.Fatalf("NewWorktreeFilter(%v): %v", opts.globs, err)
+	}
 	orch := switcher.NewOrchestrator(switcher.OrchestratorConfig{
-		Child:         child,
-		Worktrees:     wt,
-		Health:        opts.health,
-		Dir:           dir,
-		Logger:        log.New(io.Discard, "", 0),
-		Hook:          hook.New(hook.Config{Command: opts.switchHook}),
-		ReadyCmd:      opts.readyCmd,
-		HealthTimeout: opts.healthTimeout,
+		Child:          child,
+		Worktrees:      wt,
+		Health:         opts.health,
+		Dir:            dir,
+		Logger:         log.New(io.Discard, "", 0),
+		Hook:           hook.New(hook.Config{Command: opts.switchHook}),
+		ReadyCmd:       opts.readyCmd,
+		HealthTimeout:  opts.healthTimeout,
+		WorktreeFilter: filter,
 	})
 	token := opts.token
 	if token == "" {
@@ -720,6 +726,60 @@ func TestSwitchHookFailureLeavesChildUntouched(t *testing.T) {
 		t.Errorf("repoint called %d times, want 0", n)
 	}
 	h.assertTerminatedNotFired(t)
+}
+
+// A slug the operator's --worktree-glob filtered out is rejected on the same path
+// as an unknown one: a hand-made request cannot switch into a worktree the picker
+// never offered, and it triggers no process action.
+func TestFilteredOutSlugRejectedNoProcessAction(t *testing.T) {
+	h := newHarness(t, harnessOpts{globs: []string{"/elsewhere/*"}})
+
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
+	}
+	if code := errorCode(t, rec); code != "unknown_slug" {
+		t.Errorf("error = %q, want %q", code, "unknown_slug")
+	}
+	if n := h.child.count(); n != 0 {
+		t.Errorf("child restarted %d times, want 0", n)
+	}
+	if n := len(h.wt.calls()); n != 0 {
+		t.Errorf("repoint called %d times, want 0", n)
+	}
+}
+
+// The main worktree survives every filter: switching back is the escape hatch out
+// of a dirty or broken worktree, so no glob may take it away. The current
+// worktree here is the feature one, and the glob matches nothing.
+func TestMainIsAlwaysASwitchTargetDespiteFilter(t *testing.T) {
+	snap := twoWorktreeSnapshot(false, gitinfo.CurrentWorktree{Path: "/repo/feature", Slug: "feature"})
+	h := newHarness(t, harnessOpts{
+		snap:  &snap,
+		dir:   "/repo/feature",
+		globs: []string{"/elsewhere/*"},
+	})
+
+	rec := h.post(`{"slug":"main"}`, sameOriginToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	if got := h.child.restarts(); len(got) != 1 || got[0] != "/repo/main" {
+		t.Fatalf("restarts = %v, want [/repo/main]", got)
+	}
+}
+
+// A matching glob leaves a switch working exactly as it does unfiltered.
+func TestMatchingGlobKeepsSlugSwitchable(t *testing.T) {
+	h := newHarness(t, harnessOpts{globs: []string{"/repo/*"}})
+
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	if got := h.child.restarts(); len(got) != 1 || got[0] != "/repo/feature" {
+		t.Fatalf("restarts = %v, want [/repo/feature]", got)
+	}
 }
 
 // newReadyHarness is a harness whose worktree paths are real directories, so an

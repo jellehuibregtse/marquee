@@ -10,8 +10,11 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
+	"github.com/jellehuibregtse/marquee/internal/hook"
 	"github.com/jellehuibregtse/marquee/internal/knob"
+	"github.com/jellehuibregtse/marquee/internal/switcher"
 )
 
 // errUsage signals a usage problem whose message parseArgs has already
@@ -55,21 +58,36 @@ func parsePills(raw string) ([]string, error) {
 	return pills, nil
 }
 
+// checkTimeout rejects a non-positive switch timeout. Zero and negative are
+// both refused rather than read as "no limit": the orchestrator falls back to
+// its built-in default for any non-positive value, so an operator who writes
+// --hook-timeout 0 hoping to lift the ceiling would silently get 5m, and a
+// negative one would abort the hook the instant it starts.
+func checkTimeout(name string, d time.Duration) error {
+	if d <= 0 {
+		return fmt.Errorf("invalid %s %s: must be greater than zero", name, d)
+	}
+	return nil
+}
+
 type options struct {
-	listen       string
-	internalPort int
-	position     string
-	size         string
-	theme        string
-	pills        []string
-	noOpen       bool
-	quiet        bool
-	allowHosts   []string
-	unsafeListen bool
-	keepCSP      bool
-	switchHook   string
-	showVersion  bool
-	command      []string
+	listen         string
+	internalPort   int
+	position       string
+	size           string
+	theme          string
+	pills          []string
+	noOpen         bool
+	quiet          bool
+	allowHosts     []string
+	unsafeListen   bool
+	keepCSP        bool
+	switchHook     string
+	hookTimeout    time.Duration
+	healthTimeout  time.Duration
+	restartTimeout time.Duration
+	showVersion    bool
+	command        []string
 }
 
 // stringList collects a repeatable string flag (e.g. --allow-host a
@@ -100,6 +118,9 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen, exposing the proxy to the network")
 	fs.BoolVar(&opts.keepCSP, "keep-csp", false, "leave the app's Content-Security-Policy untouched (the bar may not load if its CSP forbids same-origin scripts)")
 	fs.StringVar(&opts.switchHook, "switch-hook", "", "command run in a worktree before the child starts there, including at startup in the worktree marquee is launched in (e.g. \"bundle install\"); empty disables it")
+	fs.DurationVar(&opts.hookTimeout, "hook-timeout", hook.DefaultTimeout, "how long --switch-hook may run on any leg before its process group is killed, e.g. 20m")
+	fs.DurationVar(&opts.healthTimeout, "health-timeout", switcher.DefaultHealthTimeout, "how long to wait for a restarted child to become healthy before the switch reverts, e.g. 90s")
+	fs.DurationVar(&opts.restartTimeout, "restart-timeout", switcher.DefaultRestartTimeout, "how long a single stop-and-spawn of the child may take, e.g. 60s")
 	fs.BoolVar(&opts.showVersion, "version", false, "print version and exit")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintln(out, "usage: marquee [flags] -- command [args...]")
@@ -129,6 +150,19 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 		return nil, errUsage
 	}
 	opts.pills = pills
+	for _, tf := range []struct {
+		name  string
+		value time.Duration
+	}{
+		{"--hook-timeout", opts.hookTimeout},
+		{"--health-timeout", opts.healthTimeout},
+		{"--restart-timeout", opts.restartTimeout},
+	} {
+		if err := checkTimeout(tf.name, tf.value); err != nil {
+			_, _ = fmt.Fprintf(out, "marquee: %v\n", err)
+			return nil, errUsage
+		}
+	}
 	if !opts.showVersion && len(opts.command) == 0 {
 		fs.Usage()
 		return nil, errUsage

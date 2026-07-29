@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
+	"github.com/jellehuibregtse/marquee/internal/hook"
 	"github.com/jellehuibregtse/marquee/internal/proxy"
 	"github.com/jellehuibregtse/marquee/internal/switcher"
 	"github.com/jellehuibregtse/marquee/internal/switching"
@@ -182,12 +183,12 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 		dir = "/repo/main"
 	}
 	orch := switcher.NewOrchestrator(switcher.OrchestratorConfig{
-		Child:      child,
-		Worktrees:  wt,
-		Health:     opts.health,
-		Dir:        dir,
-		Logger:     log.New(io.Discard, "", 0),
-		SwitchHook: opts.switchHook,
+		Child:     child,
+		Worktrees: wt,
+		Health:    opts.health,
+		Dir:       dir,
+		Logger:    log.New(io.Discard, "", 0),
+		Hook:      hook.New(hook.Config{Command: opts.switchHook}),
 	})
 	token := opts.token
 	if token == "" {

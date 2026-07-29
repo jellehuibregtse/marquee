@@ -99,7 +99,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen, exposing the proxy to the network")
 	fs.BoolVar(&opts.keepCSP, "keep-csp", false, "leave the app's Content-Security-Policy untouched (the bar may not load if its CSP forbids same-origin scripts)")
-	fs.StringVar(&opts.switchHook, "switch-hook", "", "command run in the target worktree before switching to it (e.g. \"bundle install\"); empty disables it")
+	fs.StringVar(&opts.switchHook, "switch-hook", "", "command run in a worktree before the child starts there, including at startup in the worktree marquee is launched in (e.g. \"bundle install\"); empty disables it")
 	fs.BoolVar(&opts.showVersion, "version", false, "print version and exit")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintln(out, "usage: marquee [flags] -- command [args...]")

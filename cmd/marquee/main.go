@@ -18,6 +18,7 @@ import (
 
 	"github.com/jellehuibregtse/marquee/internal/ghinfo"
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
+	"github.com/jellehuibregtse/marquee/internal/hook"
 	"github.com/jellehuibregtse/marquee/internal/port"
 	"github.com/jellehuibregtse/marquee/internal/proxy"
 	"github.com/jellehuibregtse/marquee/internal/runner"
@@ -115,18 +116,19 @@ func run() int {
 		Port: internalPort,
 		Logf: func(format string, args ...any) { log.Info(format, args...) },
 	})
-	if err := child.Start(); err != nil {
-		log.Error("could not start child: %v", err)
-		_ = ln.Close()
-		return 1
-	}
-	if pgid := child.PGID(); pidPathErr == nil && pgid > 0 {
-		if err := writePidfile(pidPath, pgid); err != nil {
-			log.Warn("could not write pidfile %s: %v", pidPath, err)
-		} else {
-			defer removePidfile(pidPath)
-		}
-	}
+
+	// The launch worktree is a worktree like any other, so it gets bootstrapped
+	// like any other: the hook runs here before the first child start, not only on
+	// the switch legs. Without this the one worktree marquee is started in is the
+	// one that never gets set up, which is how a main checkout ends up running
+	// against whatever a half-configured environment points at. A failing hook
+	// refuses the boot outright, mirroring a switch that fails its hook before
+	// anything has moved: nothing is started, so there is nothing to recover.
+	switchHook := hook.New(hook.Config{
+		Command: opts.switchHook,
+		Logf:    func(format string, args ...any) { log.Info(format, args...) },
+		Errf:    func(format string, args ...any) { log.Error(format, args...) },
+	})
 
 	git := gitinfo.Start(workdir, 2*time.Second, nil)
 	defer git.Stop()
@@ -162,11 +164,11 @@ func run() int {
 	// the orchestrator simply forwards a dying child outward as before.
 	healthAddr := fmt.Sprintf("127.0.0.1:%d", internalPort)
 	orch := switcher.NewOrchestrator(switcher.OrchestratorConfig{
-		Child:      child,
-		Worktrees:  worktrees{repoint: func(dir string) { git.Repoint(dir); gh.Repoint(dir) }},
-		Health:     func(ctx context.Context) error { return port.WaitTCP(ctx, healthAddr, 0) },
-		Dir:        workdir,
-		SwitchHook: opts.switchHook,
+		Child:     child,
+		Worktrees: worktrees{repoint: func(dir string) { git.Repoint(dir); gh.Repoint(dir) }},
+		Health:    func(ctx context.Context) error { return port.WaitTCP(ctx, healthAddr, 0) },
+		Dir:       workdir,
+		Hook:      switchHook,
 	})
 	if switchToken != "" {
 		sw := switcher.New(switcher.Config{Token: switchToken, Orchestrator: orch})
@@ -174,6 +176,10 @@ func run() int {
 		handler.SetSwitchSource(orch)
 	}
 
+	// Serve before the child exists. The proxy already answers an unreachable
+	// upstream with its self-refreshing "app is starting" page, so a browser that
+	// arrives during a several-minute bootstrap gets that instead of an accepted
+	// connection nobody ever answers.
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
@@ -181,12 +187,52 @@ func run() int {
 	log.Info("listening on http://%s, upstream 127.0.0.1:%d, child: %s",
 		ln.Addr(), internalPort, strings.Join(opts.command, " "))
 
+	// Signals are wired before the bootstrap runs, so Ctrl-C during a long hook
+	// kills the hook's process group (through its context) instead of leaving a
+	// "bundle install" running with no marquee left to own it.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	hookCtx, cancelHook := context.WithCancel(context.Background())
+	defer cancelHook()
+	hookErr := make(chan error, 1)
+	go func() { hookErr <- switchHook.Run(hookCtx, workdir) }()
+	select {
+	case err := <-hookErr:
+		if err != nil {
+			log.Error("refusing to start the child: %v", err)
+			_ = ln.Close()
+			return 1
+		}
+	case sig := <-sigCh:
+		log.Info("received %s while bootstrapping %s, stopping the switch-hook", sig, workdir)
+		cancelHook()
+		<-hookErr
+		_ = ln.Close()
+		return 1
+	case err := <-serveErr:
+		log.Error("server error: %v", err)
+		cancelHook()
+		<-hookErr
+		return 1
+	}
+
+	if err := child.Start(); err != nil {
+		log.Error("could not start child: %v", err)
+		_ = ln.Close()
+		return 1
+	}
+	if pgid := child.PGID(); pidPathErr == nil && pgid > 0 {
+		if err := writePidfile(pidPath, pgid); err != nil {
+			log.Warn("could not write pidfile %s: %v", pidPath, err)
+		} else {
+			defer removePidfile(pidPath)
+		}
+	}
+
 	if !opts.noOpen {
 		go openWhenHealthy(child, fmt.Sprintf("127.0.0.1:%d", internalPort), browserURL(opts.listen), log)
 	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	select {
 	case sig := <-sigCh:

@@ -236,8 +236,11 @@ revert. When a switch does get far enough to stop the child before failing, the
 revert re-runs the hook in the previous worktree — still the operator's own CLI
 command, cwd set to git's own worktree path — so a cleanup step can clear stale
 process-manager state before the child restarts there; this reuses the same
-operator-only command and adds no request-derived input. See the "Worktree
-switch endpoint" section for where it sits in the guard/switch sequence.
+operator-only command and adds no request-derived input. The startup leg (the
+hook in the launch worktree, before the first child start) is further still from
+this surface: it runs before the listener serves a single request, with the `cwd`
+taken from `os.Getwd`. See the "Worktree switch endpoint" section for where the
+hook sits in the guard/switch sequence.
 
 The one signal-adjacent path from v1 — the stale-child pidfile warning — is
 hardened against corrupt input: see Threat 7's pidfile note.
@@ -552,14 +555,21 @@ user:
 
 **Switch hook (`--switch-hook`).** A fresh worktree often cannot boot until its
 dependencies are installed (git-sourced gems, `node_modules`), so a switch into
-it would otherwise fail. The optional `--switch-hook` command bootstraps the
-target worktree first: it runs in the target directory (`cwd` = git's worktree
-path) **before** the child is restarted there, via
+it would otherwise fail. The optional `--switch-hook` command bootstraps whatever
+worktree the child is about to start in: the target of a switch, the previous
+worktree on a revert, and the launch worktree on startup (see below). It runs in
+that directory (`cwd` = git's worktree path) **before** the child is started
+there, from `internal/hook` (the one unit `cmd/marquee` and the switch
+orchestrator share), via
 `exec.CommandContext(ctx, "sh", "-c", hookCmd)`, bounded by a hook timeout
 (default 5 minutes; bootstrapping is slow) that runs inside the same in-flight
 switch and busy lock as the rest of the switch. Its stdout and stderr are
-streamed to marquee's stderr, prefixed `switch-hook: …`, so the operator sees
-progress and errors. It is **off by default** and, as Threat 4 records, is
+streamed to marquee's stderr as it runs, prefixed `switch-hook: …`, so the
+operator watches a bootstrap happen; that stream is informational output, so
+`--quiet` suppresses it, and the last lines of a **failing** hook (bounded to 50
+lines and 8 KB, so a chatty hook cannot grow marquee's memory) are repeated
+through the error path that `--quiet` never suppresses. A hook that fails always
+says why. It is **off by default** and, as Threat 4 records, is
 operator-only CLI input — never influenced by the HTTP request or the slug.
 Because the hook runs **before the current child is stopped**, a hook failure
 (non-zero exit or timeout) fails the switch **without touching the running
@@ -578,6 +588,22 @@ mildly wasteful, but that cost is minor next to a dead dev server, and a hook
 failure on the revert is only logged (not fatal) so recovery still attempts the
 restart. The hook is operator-only CLI input either way, so running it on the
 revert widens no attack surface.
+
+**The hook also runs on the initial start**, in the worktree marquee was launched
+in, before `cmd/marquee` spawns the child at all. Otherwise that one worktree
+would be the only one marquee never bootstraps, which is how a checkout ends up
+running against a half-configured environment. This leg is the furthest from HTTP
+input of the three: it happens before the listener serves anything, no request
+exists, and the only values involved are marquee's own `--switch-hook` flag and
+its launch directory from `os.Getwd`. A failure there mirrors a switch whose hook
+fails before anything moved: marquee refuses to start the child and exits
+non-zero, so no process is spawned and no pidfile is written (`writePidfile` runs
+only after a successful start). marquee's own listener is already serving by then,
+so the window belongs to the existing "app is starting" interstitial rather than
+to an accepted connection nobody answers, and `signal.Notify` is installed before
+the hook starts: SIGINT or SIGTERM during a bootstrap cancels the hook's context,
+which SIGKILLs its process group, so an interrupted bootstrap leaves nothing
+running behind it. Attach mode has no child and never runs the hook.
 
 **Reclaiming the internal port on a switch (kill-by-port).** marquee stops the
 child by killing its whole process group. A manager such as `overmind` or a
@@ -657,9 +683,11 @@ with a fixed token, and no golden encodes the random value.
   child is stopped so a hook failure leaves the child untouched, `switchInto` for
   the restart→health→**live-child**→repoint step, `revertInto` for the single
   revert that re-runs the hook in the previous worktree, the `Alive` check that
-  fails a switch to an exited child, `runSwitchHook` for the operator hook, the
-  `ChildController`/`Worktrees` ports, the phase timeline, and the `monitor` that
-  forwards only unhandled child deaths to `Terminated`);
+  fails a switch to an exited child, the `ChildController`/`Worktrees` ports, the
+  phase timeline, and the `monitor` that forwards only unhandled child deaths to
+  `Terminated`); `Runner.Run` and the bounded failure tail in
+  `internal/hook/hook.go` (the operator hook itself: own process group, group kill
+  on timeout and the output sinks);
   `Runner.Exits` (re-arming, reporting only exits the runner did not cause),
   `Runner.Alive`, the `stopping` flag that swallows Stop/Restart exits at the
   source, and the wait goroutine in `internal/runner/runner.go` (BeginManaged /
@@ -709,7 +737,22 @@ with a fixed token, and no golden encodes the random value.
   load-bearing: it clears a stale-socket-shaped blocker in the previous worktree
   so the revert recovers, reproducing the real incident) in
   `internal/switcher/integration_test.go` (each asserts the shutdown
-  signal is or is not triggered against the real process lifecycle); the runner-level
+  signal is or is not triggered against the real process lifecycle);
+  the hook-unit tests `TestRunUsesTheGivenWorktreeAsWorkingDirectory`,
+  `TestRunReportsANonZeroExit`, `TestUnconfiguredHookIsANoOp`,
+  `TestTimeoutKillsTheWholeHookProcessGroup` (a hanging hook's grandchild does not
+  outlive the timeout), `TestParentCancellationStopsTheHook`,
+  `TestFailureIsRepeatedThroughTheErrorSink` and `TestFailureTailIsCapped` (a
+  failing hook's reason reaches a sink `--quiet` cannot drop, bounded) in
+  `internal/hook/hook_test.go`; the startup-leg tests
+  `TestStartupHookRunsBeforeTheInitialChildStart` (the child is gated on the
+  hook's own work, so it can only boot if the hook ran first),
+  `TestFailingStartupHookRefusesToBoot` (non-zero exit, no child, nothing on the
+  internal port, no pidfile),
+  `TestListenerServesTheStartingPageDuringTheStartupHook`,
+  `TestSignalDuringTheStartupHookStopsTheHook` (Ctrl-C mid-bootstrap kills the
+  hook's group instead of orphaning it) and
+  `TestQuietStillShowsWhyTheStartupHookFailed` in `e2e/hook_test.go`; the runner-level
   lifecycle tests `TestExitReportedOnUnexpectedExit` (wrapper-mode regression),
   `TestExitNotReportedOnStop`, `TestExitNotReportedDuringRestart` (`-race`),
   `TestExitReportedAfterRestartOnNaturalDeath` in

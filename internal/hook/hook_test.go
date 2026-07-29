@@ -263,3 +263,39 @@ func TestFailureTailIsCapped(t *testing.T) {
 		t.Errorf("the capped tail kept the oldest output: %q", got)
 	}
 }
+
+// OperatorCommand is the seam the readiness command shares with the hook, so its
+// two guarantees are worth pinning at this level rather than only through the two
+// call sites: the script runs in the worktree it was given, and cancelling the
+// context takes the whole process group with it.
+func TestOperatorCommandRunsInTheGivenDirectory(t *testing.T) {
+	dir := t.TempDir()
+	cmd := hook.OperatorCommand(context.Background(), "echo ran > marker", dir)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "marker")); err != nil {
+		t.Fatalf("script did not run with cwd %q: %v", dir, err)
+	}
+}
+
+func TestOperatorCommandCancellationKillsTheProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "grandchild-survived")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	cmd := hook.OperatorCommand(ctx, "sh -c 'sleep 5; touch "+marker+"' & wait", dir)
+	start := time.Now()
+	if err := cmd.Run(); err == nil {
+		t.Fatal("Run returned nil for a script whose context expired")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("Run took %s, want the cancellation to cut it short", elapsed)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the script's grandchild outlived the cancellation: the process group was not killed")
+	}
+}

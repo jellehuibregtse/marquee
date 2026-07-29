@@ -263,11 +263,13 @@ extra gate the target must pass before a switch counts as a success, such as
 `curl -sf localhost:3036`) is operator input from a CLI flag on exactly the same
 footing as `--switch-hook`: it is never derived from the HTTP request or the
 slug, and the slug still only selects *which* git-reported worktree the command
-runs in. It is spawned by `Orchestrator.operatorCommand`, which carries its own
+runs in. It is spawned through `hook.OperatorCommand`, the one helper that turns
+operator script text into a process: the switch hook goes through it too, so the
 justified `#nosec G204` recording that the script is operator-only and the `cwd`
-is git's own worktree path. Like the hook it runs in its own process group, and
-the group is SIGKILLed when the health timeout expires, so a hanging readiness
-check cannot leak the tree it spawned.
+is git's own worktree path lives in a single place and covers both call sites.
+That helper is also where the process group is set up, so a hanging readiness
+check is SIGKILLed as a group when the health timeout expires and cannot leak the
+tree it spawned.
 Every guard still precedes it: a request that fails the origin, token, slug, or
 dirty check spawns nothing, and the readiness command runs only after the child's
 own port has already answered.
@@ -277,7 +279,9 @@ hardened against corrupt input: see Threat 7's pidfile note.
 
 - Code: `resolveWorktree`, `Handler.serve` in `internal/switcher/switcher.go`;
   `gitinfo.Collect` / `parseWorktrees` in `internal/gitinfo/gitinfo.go`; the
-  runner `cwd` change in `Runner.Restart` (`internal/runner/runner.go`).
+  runner `cwd` change in `Runner.Restart` (`internal/runner/runner.go`);
+  `hook.OperatorCommand` in `internal/hook/hook.go` (the single spawn point for
+  operator script text, hook and readiness command alike).
 - Proven by: `TestUnknownOrTraversalSlugRejectedNoProcessAction` (every unknown
   and traversal shape → 400 with **no restart and no repoint**),
   `TestValidSwitchAgainstRealRepoRestartsAndRepoints` (a real temp repo with
@@ -291,7 +295,9 @@ hardened against corrupt input: see Threat 7's pidfile note.
   `cwd` is the target worktree) and
   `TestReadyCmdHangKillsItsProcessGroup` (a readiness command that hangs after
   spawning a background grandchild is killed at the health timeout **and** the
-  grandchild goes with it, so the group kill is proven rather than asserted),
+  grandchild goes with it, so the group kill is proven rather than asserted;
+  `TestOperatorCommandCancellationKillsTheProcessGroup` in
+  `internal/hook/hook_test.go` pins the same guarantee at the shared helper),
   `TestFilteredOutSlugRejectedNoProcessAction` (a slug excluded by
   `--worktree-glob` gets 400 `unknown_slug` with no restart and no repoint) and
   `TestMainIsAlwaysASwitchTargetDespiteFilter` (no glob can block the switch back
@@ -608,8 +614,9 @@ worktree on a revert, and the launch worktree on startup (see below). It runs in
 that directory (`cwd` = git's worktree path) **before** the child is started
 there, from `internal/hook` (the one unit `cmd/marquee` and the switch
 orchestrator share), via
-`exec.CommandContext(ctx, "sh", "-c", hookCmd)`, bounded by a hook timeout
-(default 5 minutes; bootstrapping is slow) that runs inside the same in-flight
+`hook.OperatorCommand` (`exec.CommandContext(ctx, "sh", "-c", hookCmd)` plus the
+process group), bounded by `--hook-timeout` (default 5 minutes; bootstrapping is
+slow) that runs inside the same in-flight
 switch and busy lock as the rest of the switch. Its stdout and stderr are
 streamed to marquee's stderr as it runs, prefixed `switch-hook: …`, so the
 operator watches a bootstrap happen; that stream is informational output, so

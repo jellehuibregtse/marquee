@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/jellehuibregtse/marquee/internal/gitinfo"
@@ -513,7 +511,9 @@ func (o *Orchestrator) waitReady(ctx context.Context, dir string) error {
 // alongside the run error. The output is capped: the command is retried, so a
 // chatty failure must not grow marquee's memory attempt after attempt.
 func (o *Orchestrator) runReadyCmd(ctx context.Context, dir string) ([]byte, error) {
-	cmd := o.operatorCommand(ctx, o.readyCmd, dir)
+	// The exec setup is the hook's: same cwd discipline, same process group, so a
+	// readiness check that hangs is reaped like a hook that hangs.
+	cmd := hook.OperatorCommand(ctx, o.readyCmd, dir)
 	out := &capBuffer{max: 8 << 10}
 	cmd.Stdout = out
 	cmd.Stderr = out
@@ -529,26 +529,6 @@ func (o *Orchestrator) logReadyOutput(out []byte) {
 			o.logf("ready-cmd: %s", line)
 		}
 	}
-}
-
-// operatorCommand builds an "sh -c" command for an operator-supplied script, run
-// with its cwd set to a worktree.
-func (o *Orchestrator) operatorCommand(ctx context.Context, script, dir string) *exec.Cmd {
-	// #nosec G204 -- script is the operator's own --ready-cmd CLI flag value,
-	// exactly like the wrapped dev command itself, and is never derived from the
-	// HTTP request or the switch slug; dir is git's own worktree path, not request
-	// input. The "sh -c" form is deliberate so operators can write pipelines and
-	// && chains.
-	cmd := exec.CommandContext(ctx, "sh", "-c", script)
-	cmd.Dir = dir
-	// Run it in its own process group and kill the whole group on timeout, so a
-	// script that spawns children doesn't leak them when it hangs, mirroring how
-	// the runner reaps the child and how the switch hook is run. WaitDelay bounds
-	// how long we wait for I/O to drain after.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = 5 * time.Second
-	return cmd
 }
 
 func (o *Orchestrator) logf(format string, args ...any) {

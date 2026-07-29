@@ -7,10 +7,13 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -88,6 +91,14 @@ func (f *fakeChild) Alive() bool {
 
 func (f *fakeChild) Exits() <-chan struct{} { return f.exits }
 
+// setAlive rewrites a directory's scripted liveness while a switch is running, so
+// a test can model a child that dies part-way through the readiness gate.
+func (f *fakeChild) setAlive(dir string, alive bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.aliveByDir[dir] = alive
+}
+
 func (f *fakeChild) emitExit() {
 	select {
 	case f.exits <- struct{}{}:
@@ -160,12 +171,14 @@ type harness struct {
 }
 
 type harnessOpts struct {
-	token      string
-	snap       *gitinfo.Snapshot
-	collectErr error
-	health     func(context.Context) error
-	switchHook string
-	dir        string
+	token         string
+	snap          *gitinfo.Snapshot
+	collectErr    error
+	health        func(context.Context) error
+	switchHook    string
+	readyCmd      string
+	healthTimeout time.Duration
+	dir           string
 }
 
 func newHarness(t *testing.T, opts harnessOpts) *harness {
@@ -183,12 +196,14 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 		dir = "/repo/main"
 	}
 	orch := switcher.NewOrchestrator(switcher.OrchestratorConfig{
-		Child:     child,
-		Worktrees: wt,
-		Health:    opts.health,
-		Dir:       dir,
-		Logger:    log.New(io.Discard, "", 0),
-		Hook:      hook.New(hook.Config{Command: opts.switchHook}),
+		Child:         child,
+		Worktrees:     wt,
+		Health:        opts.health,
+		Dir:           dir,
+		Logger:        log.New(io.Discard, "", 0),
+		Hook:          hook.New(hook.Config{Command: opts.switchHook}),
+		ReadyCmd:      opts.readyCmd,
+		HealthTimeout: opts.healthTimeout,
 	})
 	token := opts.token
 	if token == "" {
@@ -705,6 +720,218 @@ func TestSwitchHookFailureLeavesChildUntouched(t *testing.T) {
 		t.Errorf("repoint called %d times, want 0", n)
 	}
 	h.assertTerminatedNotFired(t)
+}
+
+// newReadyHarness is a harness whose worktree paths are real directories, so an
+// operator command can actually have its cwd set to the target worktree. It
+// returns the main and target ("feature") directories.
+func newReadyHarness(t *testing.T, opts harnessOpts) (*harness, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	main := filepath.Join(root, "main")
+	feature := filepath.Join(root, "feature")
+	for _, dir := range []string{main, feature} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap := gitinfo.Snapshot{
+		Worktree: gitinfo.CurrentWorktree{Path: main, Slug: "main", IsMain: true},
+		Worktrees: []gitinfo.Worktree{
+			{Slug: "main", Path: main, Branch: "trunk"},
+			{Slug: "feature", Path: feature, Branch: "feature"},
+		},
+	}
+	opts.snap = &snap
+	opts.dir = main
+	return newHarness(t, opts), main, feature
+}
+
+// The readiness command is retried until it exits 0, and it runs with its cwd set
+// to the TARGET worktree: the command below counts its attempts in a RELATIVE
+// file and only succeeds on the third, so finding three lines inside the target
+// directory proves both the retry loop and the cwd.
+func TestReadyCmdIsRetriedInTargetWorktreeUntilItPasses(t *testing.T) {
+	h, _, feature := newReadyHarness(t, harnessOpts{
+		health:        func(context.Context) error { return nil },
+		readyCmd:      `echo attempt >> attempts; test "$(wc -l < attempts)" -ge 3`,
+		healthTimeout: 10 * time.Second,
+	})
+
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	b, err := os.ReadFile(filepath.Join(feature, "attempts"))
+	if err != nil {
+		t.Fatalf("ready-cmd did not run in the target worktree %q: %v", feature, err)
+	}
+	if n := strings.Count(string(b), "\n"); n < 3 {
+		t.Errorf("ready-cmd ran %d times, want at least 3 (it fails until the third)", n)
+	}
+	if got := h.child.restarts(); len(got) != 1 || got[0] != feature {
+		t.Errorf("restarts = %v, want [%s]", got, feature)
+	}
+}
+
+// A readiness command that never passes fails the switch once the health timeout
+// expires, and the switch reverts. The revert leg is deliberately NOT gated on
+// the readiness command, so the command must have run only in the target
+// worktree: a check that keeps failing everywhere would otherwise report the dev
+// server as down while the previous worktree is running again.
+func TestReadyCmdTimeoutRevertsAndDoesNotGateTheRevert(t *testing.T) {
+	h, main, feature := newReadyHarness(t, harnessOpts{
+		health:        func(context.Context) error { return nil },
+		readyCmd:      `echo attempt >> attempts; exit 1`,
+		healthTimeout: 300 * time.Millisecond,
+	})
+
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		OK       bool `json:"ok"`
+		Reverted bool `json:"reverted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.OK {
+		t.Error("a switch whose ready-cmd never passed reported ok:true")
+	}
+	if !body.Reverted {
+		t.Error("reverted = false, but the previous worktree came back up")
+	}
+	if got := h.child.restarts(); len(got) != 2 || got[0] != feature || got[1] != main {
+		t.Errorf("restarts = %v, want [%s %s]", got, feature, main)
+	}
+	if got := h.wt.calls(); len(got) != 1 || got[0] != main {
+		t.Errorf("repoint calls = %v, want [%s] (never repoint to a target that failed readiness)", got, main)
+	}
+	if _, err := os.Stat(filepath.Join(feature, "attempts")); err != nil {
+		t.Errorf("ready-cmd left no attempts file in the target worktree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(main, "attempts")); err == nil {
+		t.Error("ready-cmd ran in the previous worktree; the revert must not be gated on it")
+	}
+	h.assertTerminatedNotFired(t)
+}
+
+// A readiness command that hangs is killed at the health timeout, and the kill
+// takes its whole process group with it: the command below leaves a background
+// "sleep 60" behind before hanging itself, and that grandchild must be gone too.
+// Without the process group (Setpgid plus the group SIGKILL in operatorCommand)
+// only the shell dies and the sleep survives, which is the leak a bootstrap-sized
+// check would leave every time it timed out.
+func TestReadyCmdHangKillsItsProcessGroup(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "grandchild.pid")
+	h, _, _ := newReadyHarness(t, harnessOpts{
+		health:        func(context.Context) error { return nil },
+		readyCmd:      `sleep 60 & echo $! > ` + pidPath + `; sleep 60`,
+		healthTimeout: 400 * time.Millisecond,
+	})
+
+	start := time.Now()
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("switch took %s: the hanging ready-cmd was waited on instead of killed", elapsed)
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body %s", rec.Code, rec.Body.String())
+	}
+
+	raw, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("ready-cmd recorded no grandchild pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("grandchild pid %q: %v", raw, err)
+	}
+	// Signal 0 only checks whether the pid is still around. The grandchild is not
+	// our child, so once the group kill lands it is reparented and reaped and the
+	// signal fails.
+	deadline := time.Now().Add(3 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("grandchild pid %d survived the ready-cmd timeout: the process group was not killed", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The child-liveness assertion runs AFTER the readiness gate, so a child that
+// dies while the readiness command is still being retried fails the switch. The
+// command below needs about four attempts (two seconds) to pass, and the child is
+// marked dead well before that: if the assertion moved ahead of the gate it would
+// see the still-live child and report a switch onto a dead one.
+func TestChildDyingDuringReadyRetriesFailsTheSwitch(t *testing.T) {
+	h, main, feature := newReadyHarness(t, harnessOpts{
+		health:        func(context.Context) error { return nil },
+		readyCmd:      `echo attempt >> attempts; test "$(wc -l < attempts)" -ge 4`,
+		healthTimeout: 20 * time.Second,
+	})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		h.child.setAlive(feature, false)
+	}()
+
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body %s", rec.Code, rec.Body.String())
+	}
+	if got := h.child.restarts(); len(got) != 2 || got[0] != feature || got[1] != main {
+		t.Errorf("restarts = %v, want [%s %s] (the dead target should have reverted)", got, feature, main)
+	}
+	if got := h.wt.calls(); len(got) != 1 || got[0] != main {
+		t.Errorf("repoint calls = %v, want [%s]", got, main)
+	}
+}
+
+// The readiness command is operator input and a rejected request must never reach
+// it: a request that fails the token guard spawns nothing at all.
+func TestReadyCmdNeverRunsForRejectedRequest(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	h, _, _ := newReadyHarness(t, harnessOpts{
+		health:        func(context.Context) error { return nil },
+		readyCmd:      `touch ` + marker,
+		healthTimeout: 10 * time.Second,
+	})
+
+	rec := h.post(`{"slug":"feature"}`, func(r *http.Request) {
+		r.Header.Set("Sec-Fetch-Site", "same-origin")
+		r.Header.Set("X-Marquee-Token", "not-the-token")
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("ready-cmd ran for a request that failed the token guard")
+	}
+	if n := h.child.count(); n != 0 {
+		t.Errorf("child restarted %d times, want 0", n)
+	}
+}
+
+// The cheap check gates first: when the child's port never answers, the switch
+// fails without ever spawning the readiness command.
+func TestReadyCmdNotRunWhenPortNeverAnswers(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	h, _, _ := newReadyHarness(t, harnessOpts{
+		health:        func(context.Context) error { return context.DeadlineExceeded },
+		readyCmd:      `touch ` + marker,
+		healthTimeout: 10 * time.Second,
+	})
+
+	rec := h.post(`{"slug":"feature"}`, sameOriginToken)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("ready-cmd ran even though the port never answered")
+	}
 }
 
 // An unexpected child exit that arrives WHILE a switch is in flight belongs to

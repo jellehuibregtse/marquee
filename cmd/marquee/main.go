@@ -189,6 +189,7 @@ func run() int {
 		Dir:            workdir,
 		Slug:           launchSlug,
 		Hook:           switchHook,
+		ReadyCmd:       opts.readyCmd,
 		HealthTimeout:  opts.healthTimeout,
 		RestartTimeout: opts.restartTimeout,
 	})

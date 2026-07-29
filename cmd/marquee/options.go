@@ -83,6 +83,7 @@ type options struct {
 	unsafeListen   bool
 	keepCSP        bool
 	switchHook     string
+	readyCmd       string
 	hookTimeout    time.Duration
 	healthTimeout  time.Duration
 	restartTimeout time.Duration
@@ -118,6 +119,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen, exposing the proxy to the network")
 	fs.BoolVar(&opts.keepCSP, "keep-csp", false, "leave the app's Content-Security-Policy untouched (the bar may not load if its CSP forbids same-origin scripts)")
 	fs.StringVar(&opts.switchHook, "switch-hook", "", "command run in a worktree before the child starts there, including at startup in the worktree marquee is launched in (e.g. \"bundle install\"); empty disables it")
+	fs.StringVar(&opts.readyCmd, "ready-cmd", "", "command retried in the target worktree after the child's port answers, until it exits 0 or --health-timeout expires (e.g. \"curl -sf localhost:3036\"); empty disables it")
 	fs.DurationVar(&opts.hookTimeout, "hook-timeout", hook.DefaultTimeout, "how long --switch-hook may run on any leg before its process group is killed, e.g. 20m")
 	fs.DurationVar(&opts.healthTimeout, "health-timeout", switcher.DefaultHealthTimeout, "how long to wait for a restarted child to become healthy before the switch reverts, e.g. 90s")
 	fs.DurationVar(&opts.restartTimeout, "restart-timeout", switcher.DefaultRestartTimeout, "how long a single stop-and-spawn of the child may take, e.g. 60s")

@@ -100,6 +100,21 @@ Running it on startup is the point: the worktree you happen to launch in is a wo
 
 The hook runs through `sh -c` with its working directory set to the worktree, so pipelines and `&&` chains work. **Write it to be idempotent**: the revert leg re-runs it in a worktree that was already working, and every restart runs it again.
 
+One script can serve all three legs, because marquee tells it what is going on through the environment:
+
+| Variable | What it holds |
+|---|---|
+| `MARQUEE_HOOK_LEG` | `start`, `switch`, or `revert`: which of the three legs above this run is. |
+| `MARQUEE_TARGET_SLUG` | The worktree being bootstrapped, named as `git worktree list` names it (the directory's own name). |
+| `MARQUEE_TARGET_DIR` | Absolute path marquee starts the child in, which is also the hook's working directory. Normally the worktree root, but if you launched marquee from a subdirectory of it, that subdirectory (the child gets the same one). |
+| `MARQUEE_PREV_DIR` | Absolute path of the worktree the child was running in. **Empty on `start`**, since nothing was running yet. |
+
+So a hook that only wants to do the expensive setup for a worktree it has not seen before can key off `$MARQUEE_TARGET_SLUG`, and one whose only job is cleaning up after a failed switch can do nothing unless `$MARQUEE_HOOK_LEG` is `revert`:
+
+```sh
+marquee --switch-hook 'test "$MARQUEE_HOOK_LEG" = revert && rm -f .overmind.sock; bin/setup "$MARQUEE_TARGET_SLUG"' -- overmind start
+```
+
 A failing hook (non-zero exit or a 5-minute timeout) never leaves you with a half-switched app:
 
 - **at startup** marquee refuses to start your dev command and exits non-zero;

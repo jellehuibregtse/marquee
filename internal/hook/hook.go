@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -19,6 +20,46 @@ import (
 // Bootstrapping a worktree installs dependencies and clones databases, so the
 // budget is generous.
 const DefaultTimeout = 5 * time.Minute
+
+// Leg names which child start a hook run belongs to. One script has to serve
+// all three, so the leg is exported to the hook as MARQUEE_HOOK_LEG and a hook
+// that only cares about, say, cloning a database on a first-ever start can
+// branch on it.
+type Leg string
+
+const (
+	// LegStart is the initial child start, in the worktree marquee was launched in.
+	LegStart Leg = "start"
+	// LegSwitch is a switch into another worktree.
+	LegSwitch Leg = "switch"
+	// LegRevert is the fallback to the previous worktree after a failed switch.
+	LegRevert Leg = "revert"
+)
+
+// Invocation is the worktree context of one hook run. Target is the worktree the
+// child is about to start in, and the one the hook runs in; Prev is where the
+// child was running until now, empty on LegStart because nothing was running
+// yet.
+type Invocation struct {
+	Leg        Leg
+	TargetSlug string
+	TargetDir  string
+	PrevDir    string
+}
+
+// env is the hook's view of the switch: the leg, the worktree it is bootstrapping
+// and the one being left behind. These are passed as environment entries rather
+// than substituted into the command, so nothing here can extend the operator's
+// own shell command (see docs/security.md, Threat 4). The slug is git's, from the
+// worktree list Prepare validated the request against.
+func (inv Invocation) env() []string {
+	return []string{
+		"MARQUEE_HOOK_LEG=" + string(inv.Leg),
+		"MARQUEE_TARGET_SLUG=" + inv.TargetSlug,
+		"MARQUEE_TARGET_DIR=" + inv.TargetDir,
+		"MARQUEE_PREV_DIR=" + inv.PrevDir,
+	}
+}
 
 // Config wires a Runner to its command and its two output sinks.
 type Config struct {
@@ -68,27 +109,32 @@ func New(cfg Config) *Runner {
 // caller can skip work that only exists to feed the hook.
 func (r *Runner) Configured() bool { return r != nil && r.command != "" }
 
-// Run runs the hook with its working directory set to dir. The hook's stdout and
-// stderr stream to Logf, line by line and prefixed, so the operator sees a
-// bootstrap happen. A non-zero exit or a timeout is returned as an error, and the
-// tail of the output is repeated through Errf so the reason survives a sink
-// --quiet drops; the caller decides what a failed bootstrap means for the child it
-// was about to start.
-func (r *Runner) Run(ctx context.Context, dir string) error {
+// Run runs the hook in inv.TargetDir, with inv describing the switch in the
+// hook's environment. The hook's stdout and stderr stream to Logf, line by line
+// and prefixed, so the operator sees a bootstrap happen. A non-zero exit or a
+// timeout is returned as an error, and the tail of the output is repeated through
+// Errf so the reason survives a sink --quiet drops; the caller decides what a
+// failed bootstrap means for the child it was about to start.
+func (r *Runner) Run(ctx context.Context, inv Invocation) error {
 	if !r.Configured() {
 		return nil
 	}
-	r.logf("switch-hook: running %q in %s", r.command, dir)
+	dir := inv.TargetDir
+	r.logf("switch-hook: running %q in %s (%s)", r.command, dir, inv.Leg)
 
 	hctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
 	// #nosec G204 -- command is the operator's own CLI flag value (like the
 	// wrapped dev command itself), never derived from the HTTP request or the
-	// slug; dir is git's own worktree path, not request input. Running it via
-	// "sh -c" is deliberate so operators can write pipelines and && chains.
+	// slug; dir is git's own worktree path, not request input. The one
+	// request-touched value in play, the slug, is already an exact match against
+	// git's worktree list and reaches the hook only as an environment entry, so it
+	// cannot extend the command. Running it via "sh -c" is deliberate so operators
+	// can write pipelines and && chains.
 	cmd := exec.CommandContext(hctx, "sh", "-c", r.command)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), inv.env()...)
 	// Run the hook in its own process group and kill the whole group on timeout,
 	// so a hook like "bundle install" doesn't leak its children (ruby, native
 	// builds) when it hangs — mirroring how the runner reaps the child. WaitDelay

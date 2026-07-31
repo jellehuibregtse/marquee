@@ -17,24 +17,28 @@ import (
 	"time"
 )
 
-// The two bounds on a hook run. They measure different things on purpose: how
-// long the hook has been silent is what separates a hung hook from a slow one,
-// while the total budget only exists so a hook that chatters forever cannot hold
-// a worktree hostage.
+// The two bounds on a hook run. Both are backstops against a hook that is never
+// going to finish. Neither one can tell whether the hook is making progress,
+// because from outside the process there is nothing to read that off.
 const (
 	// DefaultIdleTimeout is how long a hook may produce no output at all before its
-	// process group is killed. A bootstrap step that is working says so — bundler
-	// prints per gem, a database clone prints per step — so total silence for
-	// minutes means the step is wedged: a stalled network fetch, a lock nobody will
-	// release, a prompt nobody will answer. Two minutes sits well past the quietest
-	// legitimate gap (a single native extension compiling) and well short of how
-	// long a whole cold dependency install takes.
-	DefaultIdleTimeout = 2 * time.Minute
+	// process group is killed. Silence implies neither progress nor its absence: a
+	// bootstrap step that usually finishes in seconds has been seen to say nothing
+	// for over two minutes, for reasons nobody could pin down afterwards, and the
+	// first version of this bound killed a healthy dev stack over it. So this is not
+	// a verdict on the step it interrupts. It exists only so a hook that will never
+	// finish cannot hold the worktree forever, whether that is a stalled network
+	// fetch, a lock nobody will release, or a prompt nobody will answer. Ten minutes
+	// is generous enough that a stall has to look permanent before it fires, and
+	// still well inside the hour the ceiling allows. No single number fits every
+	// bootstrap, so a repo sets its own with --hook-idle-timeout.
+	DefaultIdleTimeout = 10 * time.Minute
 	// DefaultTimeout is the absolute ceiling on one run, used when the caller picks
 	// none (--hook-timeout). It is deliberately far above any real bootstrap,
 	// because a ceiling that fires on healthy work is worse than no ceiling at all:
 	// a cold gem build with native extensions runs for many minutes and is not
-	// stuck. Catching a hook that IS stuck is the idle timeout's job.
+	// stuck. The idle timeout is the bound that normally catches a wedged hook,
+	// this one only catches a hook that keeps printing forever.
 	DefaultTimeout = 60 * time.Minute
 )
 

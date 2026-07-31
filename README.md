@@ -78,7 +78,7 @@ Flags a repo always needs belong in [`.marquee/config`](#marqueeconfig-so-you-do
 | `--quiet` | off | Suppress marquee's own log lines. |
 | `--allow-host` | — | Add a hostname to the internal-endpoint allowlist (repeatable). |
 | `--switch-hook` | `.marquee/hook` | Command run in a worktree before the child starts there, e.g. `"bundle install"`, including the worktree marquee itself is launched in. Bootstraps a fresh worktree; defaults to `.marquee/hook` when that is executable, and an empty value turns it off. See [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |
-| `--hook-timeout` | `60m` | Absolute ceiling on one `--switch-hook` run before marquee kills its process group. A hook that has printed nothing for 2 minutes is killed long before this; see [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |
+| `--hook-timeout` | `60m` | Absolute ceiling on one `--switch-hook` run before marquee kills its process group. A hook that has printed nothing for 10 minutes is killed long before this; see [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |
 | `--worktree-glob` | — | Only offer worktrees whose absolute path matches this glob as switch targets (repeatable). See [Switching worktrees](#switching-worktrees). |
 | `--ready-cmd` | — | Extra readiness check the target must pass before a switch counts as a success, e.g. `"curl -sf localhost:3036"`. See [Switching worktrees](#switching-worktrees). |
 | `--health-timeout` | `30s` | How long to wait for the restarted child's port, and separately for `--ready-cmd`, before the switch reverts. |
@@ -172,7 +172,7 @@ So a hook that only wants to do the expensive setup for a worktree it has not se
 marquee --switch-hook 'test "$MARQUEE_HOOK_LEG" = revert && rm -f .overmind.sock; bin/setup "$MARQUEE_TARGET_SLUG"' -- overmind start
 ```
 
-marquee decides a hook is stuck from its output, not from a stopwatch: a hook that has printed **nothing for 2 minutes** is killed, process group and all. Bootstrap steps report progress as they work, so silence that long means something is wedged — a stalled fetch, a lock, a prompt waiting for an answer you cannot give. A hook that keeps printing is left alone however long it takes, so a cold dependency install building native extensions is not cut off for being slow. `--hook-timeout` is only the outer ceiling on one run (60 minutes), high enough that it should never fire; when a hook is killed, the error says which of the two it was.
+A hook that has printed **nothing for 10 minutes** is killed, process group and all. That bound is not a judgement about whether your bootstrap is making progress, because nothing marquee can see tells it that: a step that normally finishes in seconds can go quiet for minutes and then finish fine. It is there so a hook that will never finish (a stalled fetch, a lock, a prompt waiting for an answer you cannot give) cannot hold the worktree forever, so it is set generously. A hook that keeps printing is left alone however long it takes, so a cold dependency install building native extensions is not cut off for being slow. `--hook-timeout` is only the outer ceiling on one run (60 minutes), high enough that it should never fire; when a hook is killed, the error says which of the two it was.
 
 A failing hook (a non-zero exit, or either of those kills) never leaves you with a half-switched app:
 

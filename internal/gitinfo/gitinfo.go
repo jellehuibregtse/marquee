@@ -84,11 +84,16 @@ func collect(dir string) (Snapshot, error) {
 	}, nil
 }
 
+// noOptionalLocks keeps `git status` from taking index.lock to write back the
+// index it refreshed, which would put marquee in a lock race with the editor in
+// the same worktree. Nothing here writes to the repository.
+const noOptionalLocks = "--no-optional-locks"
+
 func runGit(dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 	// #nosec G204 -- args are fixed git subcommands chosen internally, never derived from HTTP or user input.
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", append([]string{noOptionalLocks}, args...)...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

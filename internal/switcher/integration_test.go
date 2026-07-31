@@ -226,9 +226,6 @@ func newIntHarnessHook(t *testing.T, switchHook string) *intHarness {
 	t.Helper()
 	main := evalDir(t)
 	gitCmd(t, main, "init", "-b", "trunk")
-	gitCmd(t, main, "config", "user.name", "Fixture Author")
-	gitCmd(t, main, "config", "user.email", "fixture@example.com")
-	gitCmd(t, main, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(main, "boot-ok"), []byte("ok\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -675,9 +672,6 @@ func newDaemonHarness(t *testing.T) *intHarness {
 	t.Helper()
 	main := evalDir(t)
 	gitCmd(t, main, "init", "-b", "trunk")
-	gitCmd(t, main, "config", "user.name", "Fixture Author")
-	gitCmd(t, main, "config", "user.email", "fixture@example.com")
-	gitCmd(t, main, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(main, "boot-ok"), []byte("ok\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -114,6 +114,89 @@ func repoRoot() string {
 	return filepath.Dir(wd)
 }
 
+// fixtureIdentity is the author and committer of every fixture commit. It rides
+// in the environment because a `git config` write lands in whatever repository
+// the directory turns out to belong to, and one that resolved somewhere real once
+// renamed this repository's own author for eleven commits.
+var fixtureIdentity = []string{
+	"GIT_AUTHOR_NAME=e2e",
+	"GIT_AUTHOR_EMAIL=e2e@example.com",
+	"GIT_COMMITTER_NAME=e2e",
+	"GIT_COMMITTER_EMAIL=e2e@example.com",
+}
+
+// runFixtureGit runs one git command for the fixture repo at dir, with the
+// ambient git configuration and the developer's signing setup out of the way.
+func runFixtureGit(dir string, args ...string) error {
+	if err := assertFixtureRoot(dir); err != nil {
+		return err
+	}
+	// gpgsign is a flag rather than a config write for the same reason.
+	full := append([]string{"-c", "commit.gpgsign=false"}, args...)
+	cmd := exec.Command("git", full...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	cmd.Env = append(cmd.Env, fixtureIdentity...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, out)
+	}
+	return nil
+}
+
+// assertNoRepository refuses a fixture directory that already belongs to a git
+// repository, its own toplevel included. It has to run before the fixture's init,
+// because git init reinitializes an existing repository instead of failing, and by
+// `add .` there is nothing left to notice.
+func assertNoRepository(dir string) error {
+	top, err := enclosingRepo(dir)
+	if err != nil {
+		return err
+	}
+	if top != "" {
+		return fmt.Errorf("fixture dir %s is already inside the git repository at %s; refusing to run git there", dir, top)
+	}
+	return nil
+}
+
+// assertFixtureRoot allows only a directory that is its own repository, which is
+// what the fixture's init leaves behind.
+func assertFixtureRoot(dir string) error {
+	top, err := enclosingRepo(dir)
+	if err != nil {
+		return err
+	}
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return fmt.Errorf("resolve fixture dir: %w", err)
+	}
+	if top != "" && top != want {
+		return fmt.Errorf("fixture dir %s belongs to the repository at %s; refusing to run git there", want, top)
+	}
+	return nil
+}
+
+// enclosingRepo returns the resolved toplevel of the repository dir belongs to,
+// or "" when it belongs to none. A git that could not run at all is an error
+// rather than a "no": a guard that treats every failure as permission is not a
+// guard.
+func enclosingRepo(dir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			return "", fmt.Errorf("asking git whether %s is a repository: %w", dir, err)
+		}
+		return "", nil
+	}
+	top, err := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	if err != nil {
+		return "", fmt.Errorf("resolve enclosing repository: %w", err)
+	}
+	return top, nil
+}
+
 // makeFixtureRepo creates a tiny git repo with a synthetic branch name so
 // marquee's gitinfo poller has real data to report through /__marquee/status.
 func makeFixtureRepo(dir string) error {
@@ -123,18 +206,16 @@ func makeFixtureRepo(dir string) error {
 	if err := os.WriteFile(filepath.Join(dir, "app.txt"), []byte("fixture\n"), 0o644); err != nil {
 		return err
 	}
+	if err := assertNoRepository(dir); err != nil {
+		return err
+	}
 	for _, args := range [][]string{
 		{"init", "-q", "-b", fixtureBranch},
-		{"config", "user.email", "e2e@example.com"},
-		{"config", "user.name", "e2e"},
 		{"add", "."},
 		{"commit", "-q", "-m", "fixture"},
 	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, out)
+		if err := runFixtureGit(dir, args...); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -564,4 +645,46 @@ func waitFor(t *testing.T, timeout time.Duration, what string, done func() bool)
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("timed out after %s waiting for %s", timeout, what)
+}
+
+// TestFixtureGitRefusesAForeignRepository pins the guard that the authorship
+// accident got through: a fixture path that resolves inside somebody else's git
+// repository must fail loudly instead of quietly operating on it.
+func TestFixtureGitRefusesAForeignRepository(t *testing.T) {
+	outer := t.TempDir()
+	if err := makeFixtureRepo(outer); err != nil {
+		t.Fatalf("outer fixture repo: %v", err)
+	}
+
+	inner := filepath.Join(outer, "nested")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, dir := range map[string]string{
+		"nested in another repository": inner,
+		// The worse case, and the one the first version of this guard passed: the
+		// fixture path IS a real checkout, so init reinitializes it and the commit
+		// step would commit whatever is in it.
+		"the repository's own toplevel": outer,
+	} {
+		err := makeFixtureRepo(dir)
+		if err == nil {
+			t.Fatalf("%s: makeFixtureRepo succeeded, want a refusal", name)
+		}
+		if !strings.Contains(err.Error(), "refusing to run git there") {
+			t.Fatalf("%s: error = %v, want a refusal naming the enclosing repository", name, err)
+		}
+	}
+
+	// The guard must not have fired on the legitimate repo above it, and no
+	// fixture step may have written an identity into any config file.
+	if err := runFixtureGit(outer, "rev-parse", "--show-toplevel"); err != nil {
+		t.Errorf("the outer fixture repo itself was refused: %v", err)
+	}
+	cmd := exec.Command("git", "config", "--local", "--get", "user.email")
+	cmd.Dir = outer
+	if out, err := cmd.Output(); err == nil {
+		t.Errorf("fixture wrote user.email=%q into .git/config; identity must stay in the environment", strings.TrimSpace(string(out)))
+	}
 }

@@ -9,6 +9,7 @@ package hook
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,10 +17,26 @@ import (
 	"time"
 )
 
-// DefaultTimeout bounds a hook run when the caller does not pick a timeout.
-// Bootstrapping a worktree installs dependencies and clones databases, so the
-// budget is generous.
-const DefaultTimeout = 5 * time.Minute
+// The two bounds on a hook run. They measure different things on purpose: how
+// long the hook has been silent is what separates a hung hook from a slow one,
+// while the total budget only exists so a hook that chatters forever cannot hold
+// a worktree hostage.
+const (
+	// DefaultIdleTimeout is how long a hook may produce no output at all before its
+	// process group is killed. A bootstrap step that is working says so — bundler
+	// prints per gem, a database clone prints per step — so total silence for
+	// minutes means the step is wedged: a stalled network fetch, a lock nobody will
+	// release, a prompt nobody will answer. Two minutes sits well past the quietest
+	// legitimate gap (a single native extension compiling) and well short of how
+	// long a whole cold dependency install takes.
+	DefaultIdleTimeout = 2 * time.Minute
+	// DefaultTimeout is the absolute ceiling on one run, used when the caller picks
+	// none (--hook-timeout). It is deliberately far above any real bootstrap,
+	// because a ceiling that fires on healthy work is worse than no ceiling at all:
+	// a cold gem build with native extensions runs for many minutes and is not
+	// stuck. Catching a hook that IS stuck is the idle timeout's job.
+	DefaultTimeout = 60 * time.Minute
+)
 
 // Leg names which child start a hook run belongs to. One script has to serve
 // all three, so the leg is exported to the hook as MARQUEE_HOOK_LEG and a hook
@@ -66,8 +83,13 @@ type Config struct {
 	// Command is the operator's --switch-hook value. Empty makes the Runner a
 	// working no-op.
 	Command string
-	// Timeout bounds one run; zero means DefaultTimeout.
+	// Timeout is the absolute ceiling on one run; zero means DefaultTimeout.
 	Timeout time.Duration
+	// IdleTimeout is how long the run may produce no output before it is killed;
+	// zero means DefaultIdleTimeout. It is not an operator knob — there is no flag
+	// for it, because a hook that has gone quiet is hung whatever the operator
+	// believes — so the only reason to set it is a test that cannot wait minutes.
+	IdleTimeout time.Duration
 	// Logf receives the hook's output while it runs, so the operator watches a
 	// bootstrap happen. It is ordinary informational output, which marquee's
 	// --quiet suppresses.
@@ -84,6 +106,7 @@ type Config struct {
 type Runner struct {
 	command string
 	timeout time.Duration
+	idle    time.Duration
 	logf    func(string, ...any)
 	errf    func(string, ...any)
 }
@@ -94,6 +117,10 @@ func New(cfg Config) *Runner {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+	idle := cfg.IdleTimeout
+	if idle <= 0 {
+		idle = DefaultIdleTimeout
+	}
 	logf := cfg.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -102,7 +129,7 @@ func New(cfg Config) *Runner {
 	if errf == nil {
 		errf = logf
 	}
-	return &Runner{command: cfg.Command, timeout: timeout, logf: logf, errf: errf}
+	return &Runner{command: cfg.Command, timeout: timeout, idle: idle, logf: logf, errf: errf}
 }
 
 // Configured reports whether an operator actually supplied a hook command, so a
@@ -111,10 +138,12 @@ func (r *Runner) Configured() bool { return r != nil && r.command != "" }
 
 // Run runs the hook in inv.TargetDir, with inv describing the switch in the
 // hook's environment. The hook's stdout and stderr stream to Logf, line by line
-// and prefixed, so the operator sees a bootstrap happen. A non-zero exit or a
-// timeout is returned as an error, and the tail of the output is repeated through
-// Errf so the reason survives a sink --quiet drops; the caller decides what a
-// failed bootstrap means for the child it was about to start.
+// and prefixed, so the operator sees a bootstrap happen. A non-zero exit, a
+// stretch of silence longer than the idle timeout, or the ceiling running out is
+// returned as an error naming which of the three it was, and the tail of the
+// output is repeated through Errf so the reason survives a sink --quiet drops;
+// the caller decides what a failed bootstrap means for the child it was about to
+// start.
 func (r *Runner) Run(ctx context.Context, inv Invocation) error {
 	if !r.Configured() {
 		return nil
@@ -122,7 +151,9 @@ func (r *Runner) Run(ctx context.Context, inv Invocation) error {
 	dir := inv.TargetDir
 	r.logf("switch-hook: running %q in %s (%s)", r.command, dir, inv.Leg)
 
-	hctx, cancel := context.WithTimeout(ctx, r.timeout)
+	ceiling, cancelCeiling := context.WithTimeout(ctx, r.timeout)
+	defer cancelCeiling()
+	hctx, cancel := context.WithCancel(ceiling)
 	defer cancel()
 
 	cmd := OperatorCommand(hctx, r.command, dir)
@@ -130,21 +161,79 @@ func (r *Runner) Run(ctx context.Context, inv Invocation) error {
 	// command text. Setting Env explicitly replaces the inherited copy, so the
 	// parent's variables are re-added rather than assumed.
 	cmd.Env = append(os.Environ(), inv.env()...)
-	out := &output{logf: r.logf}
+	out := &output{logf: r.logf, activity: make(chan struct{}, 1)}
 	cmd.Stdout = out
 	cmd.Stderr = out
+
+	idled := watchIdle(hctx, cancel, out.activity, r.idle)
 	err := cmd.Run()
 	out.flush()
-	if err != nil {
-		// Repeat what the hook said on its way out. The streamed copy above went to
-		// the informational sink, which --quiet drops; a failure has to explain
-		// itself even then.
-		for _, line := range out.tail {
-			r.errf("switch-hook: %s", line)
-		}
-		return fmt.Errorf("switch-hook %q failed: %w", r.command, err)
+	cancel()
+	if err == nil {
+		return nil
 	}
-	return nil
+	// Repeat what the hook said on its way out. The streamed copy above went to
+	// the informational sink, which --quiet drops; a failure has to explain
+	// itself even then.
+	for _, line := range out.tail {
+		r.errf("switch-hook: %s", line)
+	}
+	// The two kills read nothing alike to whoever has to act on them: silence
+	// points at the step the hook was on, while the ceiling only says the whole
+	// bootstrap was too long. Report which one happened.
+	switch {
+	case closed(idled):
+		return fmt.Errorf("switch-hook %q produced no output for %s and was killed: %w", r.command, r.idle, err)
+	case errors.Is(ceiling.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("switch-hook %q exceeded its %s limit and was killed: %w", r.command, r.timeout, err)
+	}
+	return fmt.Errorf("switch-hook %q failed: %w", r.command, err)
+}
+
+// watchIdle kills the run through cancel when nothing has been written for idle,
+// and returns the channel it closes first so Run can tell an idle kill from any
+// other failure. Every write to the hook's output is a sign of life, so the
+// existing output writer is the whole liveness signal; the watchdog stops with
+// the run's context.
+func watchIdle(ctx context.Context, cancel context.CancelFunc, activity <-chan struct{}, idle time.Duration) <-chan struct{} {
+	idled := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(idle)
+		defer timer.Stop()
+		for {
+			select {
+			case <-activity:
+				if !timer.Stop() {
+					// The timer had already fired but the run is over anyway, or its send is
+					// still queued; drain it so the reset starts from a clean timer.
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(idle)
+			case <-timer.C:
+				// Closed BEFORE the kill, so a Run that returns because of this kill
+				// always observes it.
+				close(idled)
+				cancel()
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return idled
+}
+
+// closed reports whether ch has been closed, without blocking.
+func closed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // OperatorCommand builds an "sh -c" command for a script the operator supplied
@@ -190,12 +279,21 @@ const (
 type output struct {
 	logf func(string, ...any)
 	buf  []byte
+	// activity carries one non-blocking notification per write, for the idle
+	// watchdog. Writes are the signal rather than whole lines, so a hook whose
+	// progress is a carriage-returned counter with no newline in sight still counts
+	// as alive.
+	activity chan struct{}
 
 	tail      []string
 	tailBytes int
 }
 
 func (o *output) Write(p []byte) (int, error) {
+	select {
+	case o.activity <- struct{}{}:
+	default:
+	}
 	o.buf = append(o.buf, p...)
 	for {
 		i := bytes.IndexByte(o.buf, '\n')

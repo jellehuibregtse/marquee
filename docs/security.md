@@ -670,9 +670,15 @@ that directory (`cwd` = git's worktree path) **before** the child is started
 there, from `internal/hook` (the one unit `cmd/marquee` and the switch
 orchestrator share), via
 `hook.OperatorCommand` (`exec.CommandContext(ctx, "sh", "-c", hookCmd)` plus the
-process group), bounded by `--hook-timeout` (default 5 minutes; bootstrapping is
-slow) that runs inside the same in-flight
-switch and busy lock as the rest of the switch. Its stdout and stderr are
+process group), bounded on two axes that run inside the same in-flight switch and
+busy lock as the rest of the switch: an **idle timeout** (`hook.DefaultIdleTimeout`,
+2 minutes) that kills the group when the hook has written nothing at all for that
+long, and `--hook-timeout` (`hook.DefaultTimeout`, 60 minutes) as the absolute
+ceiling on one run. Output is the liveness signal because bootstrapping is slow
+but not silent: a fixed total budget kills a cold dependency install for being
+slow, while a hook that has stopped printing is wedged whatever the budget says.
+The ceiling is set high enough that it should never fire on real work, and a hook
+killed by either bound says in its error which one it was. Its stdout and stderr are
 streamed to marquee's stderr as it runs, prefixed `switch-hook: …`, so the
 operator watches a bootstrap happen; that stream is informational output, so
 `--quiet` suppresses it, and the last lines of a **failing** hook (bounded to 50
@@ -853,8 +859,12 @@ with a fixed token, and no golden encodes the random value.
   signal is or is not triggered against the real process lifecycle);
   the hook-unit tests `TestRunUsesTheGivenWorktreeAsWorkingDirectory`,
   `TestRunReportsANonZeroExit`, `TestUnconfiguredHookIsANoOp`,
-  `TestTimeoutKillsTheWholeHookProcessGroup` (a hanging hook's grandchild does not
-  outlive the timeout), `TestParentCancellationStopsTheHook`,
+  `TestTheCeilingKillsTheWholeHookProcessGroup` (a hanging hook's grandchild does
+  not outlive the ceiling), `TestSilenceKillsTheHookAndItsProcessGroup` (the idle
+  timeout kills the group and says silence did it),
+  `TestTheCeilingKillsAHookThatNeverStopsTalking`,
+  `TestAHookThatKeepsPrintingIsNotKilled` (a hook still producing output outlives
+  its own idle timeout), `TestParentCancellationStopsTheHook`,
   `TestFailureIsRepeatedThroughTheErrorSink` and `TestFailureTailIsCapped` (a
   failing hook's reason reaches a sink `--quiet` cannot drop, bounded) in
   `internal/hook/hook_test.go`; the startup-leg tests

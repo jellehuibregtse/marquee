@@ -186,6 +186,10 @@ func TestBarScriptEmbedded(t *testing.T) {
 		"⚙︎",
 		"▾︎",
 		"●︎",
+		// Menu rebuild guard: a key over the menu's three inputs skips an identical
+		// rebuild, so the 5s status poll no longer costs an open menu its focus.
+		"#menuKey",
+		"if (key === this.#menuKey) return;",
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("bar.js missing expected marker %q", marker)

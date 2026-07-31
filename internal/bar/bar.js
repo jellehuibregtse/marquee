@@ -705,6 +705,7 @@ class MarqueeBar extends HTMLElement {
   #switching = false;
   #switchError = "";
   #menuOpen = false;
+  #menuKey = "";
   #searchQuery = "";
   #dark = window.matchMedia("(prefers-color-scheme: dark)");
   #onSchemeChange = () => this.#render();
@@ -1017,9 +1018,16 @@ class MarqueeBar extends HTMLElement {
   // is the server's recency ranking (main first, then most recently committed
   // branch); a non-empty query keeps only fuzzy matches, best score first (the
   // stable sort preserves payload order between equal scores).
+  //
+  // The list is a pure function of those three inputs, so a key over them skips
+  // an identical rebuild (the #themeKey trick in #applyThemeStyles). The 5s poll
+  // calls this unconditionally, and a rebuild costs the focus of an open menu.
   #buildMenu(worktrees, current) {
     const currentSlug = current && current.slug ? current.slug : "";
     const query = this.#searchQuery.trim();
+    const key = JSON.stringify([worktrees, currentSlug, query]);
+    if (key === this.#menuKey) return;
+    this.#menuKey = key;
     const entries = [];
     for (const worktree of worktrees) {
       const slug = String(worktree.slug || "");

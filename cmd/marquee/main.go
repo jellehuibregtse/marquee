@@ -116,13 +116,13 @@ func run() int {
 		_, _ = fmt.Fprintf(os.Stderr, "marquee: could not determine working directory: %v\n", err)
 		return 1
 	}
-	configArgs, err := loadConfigArgs(workdir)
+	config, err := loadConfigFlags(workdir)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "marquee: %v\n", err)
 		return 2
 	}
 
-	opts, err := parseArgsWithConfig(os.Args[0], configArgs, os.Args[1:], os.Stderr)
+	opts, err := parseArgsWithConfig(os.Args[0], config, os.Args[1:], os.Stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -131,8 +131,8 @@ func run() int {
 	}
 
 	log := newLogger(os.Stderr, opts.quiet)
-	if len(configArgs) > 0 {
-		log.Info("took flags from %s", configPath(workdir))
+	if !config.empty() {
+		log.Info("took flags from %s", config.path)
 	}
 
 	if opts.showVersion {

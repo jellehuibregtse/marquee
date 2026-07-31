@@ -1,9 +1,11 @@
 package e2e
 
 import (
+	"errors"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -61,6 +63,43 @@ func TestConfigFileFlagsApplyWithoutBeingPassed(t *testing.T) {
 	}
 	if logged := proc.output.String(); !strings.Contains(logged, filepath.Join(".marquee", "config")) {
 		t.Errorf("marquee did not say it took flags from the file:\n%s", logged)
+	}
+}
+
+// A flag the file holds but marquee does not have exits 2 and says which line of
+// which file it came from. The scenario is an upgrade: --no-open was a real flag
+// once, so a file written back then now names a flag that the command line the
+// operator just typed does not contain.
+func TestConfigFileBadFlagNamesTheFileAndLine(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := makeFixtureRepo(repo); err != nil {
+		t.Fatalf("build repo: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(repo, ".marquee"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "# what this repo needs\n--allow-host '*.example.test'\n--no-open\n"
+	if err := os.WriteFile(filepath.Join(repo, ".marquee", "config"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	proc, err := startMarqueeWith(repo, nil, []string{upstreamBin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proc.cmd.Process.Kill() })
+
+	var exit *exec.ExitError
+	if err := proc.wait(15 * time.Second); !errors.As(err, &exit) || exit.ExitCode() != 2 {
+		t.Fatalf("exit = %v, want status 2", err)
+	}
+	want := "marquee: " + filepath.Join(repo, ".marquee", "config") + ":3: flag provided but not defined: -no-open"
+	logged := proc.output.String()
+	if !strings.Contains(logged, want) {
+		t.Errorf("marquee did not attribute the flag to the file:\n%s", logged)
+	}
+	if !strings.Contains(logged, "usage: marquee [flags]") {
+		t.Errorf("marquee did not print its usage after refusing:\n%s", logged)
 	}
 }
 

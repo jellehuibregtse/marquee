@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +28,23 @@ func writeConfig(t *testing.T, content string) string {
 		t.Fatal(err)
 	}
 	return launchDir
+}
+
+// configOf builds the configFlags a file holding these lines would produce, so a
+// test can hand parseArgsWithConfig flags directly and still get line numbers.
+// Only the line splitting runs, not checkConfigLine, so a test can also state a
+// shape the loader would have refused.
+func configOf(t *testing.T, lines ...string) configFlags {
+	t.Helper()
+	cfg := configFlags{path: configName}
+	for i, line := range lines {
+		words, err := splitConfigLine(line)
+		if err != nil {
+			t.Fatalf("splitConfigLine(%q): %v", line, err)
+		}
+		cfg.lines = append(cfg.lines, configFlagLine{number: i + 1, words: words})
+	}
+	return cfg
 }
 
 func TestSplitConfigLine(t *testing.T) {
@@ -73,36 +92,41 @@ func TestSplitConfigLineRejectsBrokenQuoting(t *testing.T) {
 	}
 }
 
-func TestLoadConfigArgsWithoutAFile(t *testing.T) {
-	args, err := loadConfigArgs(t.TempDir())
+func TestLoadConfigFlagsWithoutAFile(t *testing.T) {
+	cfg, err := loadConfigFlags(t.TempDir())
 	if err != nil {
-		t.Fatalf("loadConfigArgs: %v", err)
+		t.Fatalf("loadConfigFlags: %v", err)
 	}
-	if len(args) != 0 {
-		t.Errorf("args = %q, want none", args)
+	if !cfg.empty() {
+		t.Errorf("args = %q, want none", cfg.args())
 	}
 }
 
-func TestLoadConfigArgsReadsFlagsCommentsAndBlanks(t *testing.T) {
+func TestLoadConfigFlagsReadsFlagsCommentsAndBlanks(t *testing.T) {
 	launchDir := writeConfig(t, `# what this repo needs
 --allow-host '*.example.test'
 
 --position top-right   # taste
 `)
-	args, err := loadConfigArgs(launchDir)
+	cfg, err := loadConfigFlags(launchDir)
 	if err != nil {
-		t.Fatalf("loadConfigArgs: %v", err)
+		t.Fatalf("loadConfigFlags: %v", err)
 	}
 	want := []string{"--allow-host", "*.example.test", "--position", "top-right"}
-	if strings.Join(args, " ") != strings.Join(want, " ") {
-		t.Errorf("args = %q, want %q", args, want)
+	if got := cfg.args(); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+	// The line each word came from is what an error message needs, and the blank
+	// line and the comment above must not shift it.
+	if len(cfg.lines) != 2 || cfg.lines[0].number != 2 || cfg.lines[1].number != 4 {
+		t.Errorf("lines = %+v, want the file's 2 and 4", cfg.lines)
 	}
 }
 
 // A file that exists but cannot be read is not the zero-config case: it was
 // written to change how marquee runs, so starting anyway with none of it applied
 // is the one outcome that must not happen.
-func TestLoadConfigArgsUnreadableFileIsAnError(t *testing.T) {
+func TestLoadConfigFlagsUnreadableFileIsAnError(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a 0000 file regardless")
 	}
@@ -110,9 +134,9 @@ func TestLoadConfigArgsUnreadableFileIsAnError(t *testing.T) {
 	if err := os.Chmod(configPath(launchDir), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	_, err := loadConfigArgs(launchDir)
+	_, err := loadConfigFlags(launchDir)
 	if err == nil {
-		t.Fatal("loadConfigArgs accepted an unreadable file")
+		t.Fatal("loadConfigFlags accepted an unreadable file")
 	}
 	if !strings.Contains(err.Error(), configPath(launchDir)) {
 		t.Errorf("error does not name the file: %v", err)
@@ -121,7 +145,7 @@ func TestLoadConfigArgsUnreadableFileIsAnError(t *testing.T) {
 
 // Abuse: the file holds flags, never the process marquee spawns. Every shape that
 // would put a word of its own into the command is refused before parsing.
-func TestLoadConfigArgsRefusesToSetTheCommand(t *testing.T) {
+func TestLoadConfigFlagsRefusesToSetTheCommand(t *testing.T) {
 	cases := map[string]string{
 		"a separator":                  "--\n",
 		"a separator after a flag":     "--quiet\n-- rm -rf /\n",
@@ -134,9 +158,9 @@ func TestLoadConfigArgsRefusesToSetTheCommand(t *testing.T) {
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
 			launchDir := writeConfig(t, content)
-			args, err := loadConfigArgs(launchDir)
+			cfg, err := loadConfigFlags(launchDir)
 			if err == nil {
-				t.Fatalf("loadConfigArgs accepted %q as %q", content, args)
+				t.Fatalf("loadConfigFlags accepted %q as %q", content, cfg.args())
 			}
 			if !strings.Contains(err.Error(), configName) && !strings.Contains(err.Error(), configPath(launchDir)) {
 				t.Errorf("error does not name the file: %v", err)
@@ -152,7 +176,7 @@ func TestLoadConfigArgsRefusesToSetTheCommand(t *testing.T) {
 func TestParseArgsWithConfigRefusesAConfigWordInTheCommand(t *testing.T) {
 	var buf bytes.Buffer
 	_, err := parseArgsWithConfig("marquee",
-		[]string{"--quiet", "true"},
+		configOf(t, "--quiet true"),
 		[]string{"--", "bin/dev"}, &buf)
 	if err == nil {
 		t.Fatal("parseArgsWithConfig accepted a config word ahead of the command")
@@ -164,7 +188,7 @@ func TestParseArgsWithConfigRefusesAConfigWordInTheCommand(t *testing.T) {
 
 func TestParseArgsWithConfigKeepsTheCommandFromTheCommandLine(t *testing.T) {
 	opts, err := parseArgsWithConfig("marquee",
-		[]string{"--position", "top-right"},
+		configOf(t, "--position top-right"),
 		[]string{"--", "bin/dev", "--flag-for-the-child"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseArgsWithConfig: %v", err)
@@ -181,7 +205,7 @@ func TestParseArgsWithConfigKeepsTheCommandFromTheCommandLine(t *testing.T) {
 // a scalar flag on the command line overrides the file's value.
 func TestParseArgsWithConfigCommandLineWinsForAScalarFlag(t *testing.T) {
 	opts, err := parseArgsWithConfig("marquee",
-		[]string{"--position", "top-right", "--theme", "sand", "--listen", "127.0.0.1:4000"},
+		configOf(t, "--position top-right", "--theme sand", "--listen 127.0.0.1:4000"),
 		[]string{"--position", "bottom-right", "--", "bin/dev"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseArgsWithConfig: %v", err)
@@ -199,7 +223,7 @@ func TestParseArgsWithConfigCommandLineWinsForAScalarFlag(t *testing.T) {
 // spell "drop the file's hosts" because the flag only ever means "also allow this".
 func TestParseArgsWithConfigRepeatableFlagsAreAdditive(t *testing.T) {
 	opts, err := parseArgsWithConfig("marquee",
-		[]string{"--allow-host", "*.example.test"},
+		configOf(t, "--allow-host '*.example.test'"),
 		[]string{"--allow-host", "other.test", "--", "bin/dev"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseArgsWithConfig: %v", err)
@@ -209,19 +233,81 @@ func TestParseArgsWithConfigRepeatableFlagsAreAdditive(t *testing.T) {
 	}
 }
 
-// An invalid flag in the file fails the run, exactly as the same word would on the
-// command line: there is one flag set and one set of rules for it.
-func TestParseArgsWithConfigRejectsABadFlag(t *testing.T) {
+// An invalid flag in the file fails the run and says where the word came from. The
+// misleading case this exists for is a file written once and then outlived by a
+// flag: without the file and line, the message reads as a complaint about a command
+// line that does not contain the flag at all.
+func TestParseArgsWithConfigAttributesABadFlagToTheFile(t *testing.T) {
+	launchDir := writeConfig(t, "# ours\n--quiet\n--not-a-real-flag\n")
+	cfg, err := loadConfigFlags(launchDir)
+	if err != nil {
+		t.Fatalf("loadConfigFlags: %v", err)
+	}
 	var buf bytes.Buffer
-	if _, err := parseArgsWithConfig("marquee", []string{"--position", "sideways"}, []string{"--", "bin/dev"}, &buf); err == nil {
+	_, err = parseArgsWithConfig("marquee", cfg, []string{"--", "bin/dev"}, &buf)
+	if !errors.Is(err, errUsage) {
+		t.Fatalf("err = %v, want errUsage", err)
+	}
+	out := buf.String()
+	want := fmt.Sprintf("marquee: %s:3: flag provided but not defined: -not-a-real-flag\n", configPath(launchDir))
+	if !strings.HasPrefix(out, want) {
+		t.Errorf("output = %q, want it to start with %q", out, want)
+	}
+	// A bad flag prints the usage dump, whichever side it came from.
+	if !strings.Contains(out, "usage: marquee [flags]") || !strings.Contains(out, "-worktree-glob") {
+		t.Errorf("output = %q, want the usage dump after the message", out)
+	}
+}
+
+// A value the flag set cannot parse is attributed the same way. It is the other
+// half of an outlived config file: a flag that changed type, or a duration written
+// without its unit, is as hard to place as a flag that no longer exists.
+func TestParseArgsWithConfigAttributesABadValueToTheFile(t *testing.T) {
+	launchDir := writeConfig(t, "--hook-timeout twenty-minutes\n")
+	cfg, err := loadConfigFlags(launchDir)
+	if err != nil {
+		t.Fatalf("loadConfigFlags: %v", err)
+	}
+	var buf bytes.Buffer
+	_, err = parseArgsWithConfig("marquee", cfg, []string{"--", "bin/dev"}, &buf)
+	if !errors.Is(err, errUsage) {
+		t.Fatalf("err = %v, want errUsage", err)
+	}
+	want := fmt.Sprintf("marquee: %s:1: invalid value \"twenty-minutes\" for flag -hook-timeout:", configPath(launchDir))
+	if out := buf.String(); !strings.HasPrefix(out, want) {
+		t.Errorf("output = %q, want it to start with %q", out, want)
+	}
+}
+
+// The other side of attribution: a flag typed on the command line is the flag
+// package's own complaint, byte for byte, and never mentions a file it did not come
+// from. A file that parses cleanly is in play here, so this is the real mixed case.
+func TestParseArgsWithConfigLeavesACommandLineFlagUnattributed(t *testing.T) {
+	var withConfig, alone bytes.Buffer
+	if _, err := parseArgsWithConfig("marquee", configOf(t, "--quiet"), []string{"--not-a-real-flag", "--", "bin/dev"}, &withConfig); err == nil {
+		t.Fatal("parseArgsWithConfig accepted an unknown flag from the command line")
+	}
+	if _, err := parseArgs("marquee", []string{"--not-a-real-flag", "--", "bin/dev"}, &alone); err == nil {
+		t.Fatal("parseArgs accepted an unknown flag")
+	}
+	if withConfig.String() != alone.String() {
+		t.Errorf("output = %q, want the message a bare command line gets: %q", withConfig.String(), alone.String())
+	}
+	if strings.Contains(withConfig.String(), configName) {
+		t.Errorf("output blames the config file for a command-line flag: %q", withConfig.String())
+	}
+}
+
+// A value the flag set accepts but marquee rejects keeps the message it has always
+// had, from either side: the complaint already quotes the flag and its value, and
+// attributing it would mean threading a source through every check in parseArgs.
+func TestParseArgsWithConfigRejectsAnInvalidPosition(t *testing.T) {
+	var buf bytes.Buffer
+	if _, err := parseArgsWithConfig("marquee", configOf(t, "--position sideways"), []string{"--", "bin/dev"}, &buf); err == nil {
 		t.Fatal("parseArgsWithConfig accepted an invalid --position from the file")
 	}
 	if out := buf.String(); !strings.Contains(out, "invalid --position") {
 		t.Errorf("message = %q, want the same complaint the command line gets", out)
-	}
-	buf.Reset()
-	if _, err := parseArgsWithConfig("marquee", []string{"--nonsense"}, []string{"--", "bin/dev"}, &buf); err == nil {
-		t.Fatal("parseArgsWithConfig accepted an unknown flag from the file")
 	}
 }
 
@@ -233,11 +319,11 @@ func TestConfigSwitchHookBeatsTheConventionalHook(t *testing.T) {
 	if err := os.WriteFile(configPath(launchDir), []byte("--switch-hook 'bin/setup'\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	configArgs, err := loadConfigArgs(launchDir)
+	cfg, err := loadConfigFlags(launchDir)
 	if err != nil {
-		t.Fatalf("loadConfigArgs: %v", err)
+		t.Fatalf("loadConfigFlags: %v", err)
 	}
-	opts, err := parseArgsWithConfig("marquee", configArgs, []string{"--", "bin/dev"}, io.Discard)
+	opts, err := parseArgsWithConfig("marquee", cfg, []string{"--", "bin/dev"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseArgsWithConfig: %v", err)
 	}
@@ -252,11 +338,11 @@ func TestConfigSwitchHookBeatsTheConventionalHook(t *testing.T) {
 // allowlist, while an unlisted host still gets a 403.
 func TestConfigAllowHostReachesTheGuard(t *testing.T) {
 	launchDir := writeConfig(t, "--allow-host '*.example.test'\n")
-	configArgs, err := loadConfigArgs(launchDir)
+	cfg, err := loadConfigFlags(launchDir)
 	if err != nil {
-		t.Fatalf("loadConfigArgs: %v", err)
+		t.Fatalf("loadConfigFlags: %v", err)
 	}
-	opts, err := parseArgsWithConfig("marquee", configArgs, []string{"--", "bin/dev"}, io.Discard)
+	opts, err := parseArgsWithConfig("marquee", cfg, []string{"--", "bin/dev"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseArgsWithConfig: %v", err)
 	}

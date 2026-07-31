@@ -338,3 +338,26 @@ func TestRunGitDeclinesOptionalLocks(t *testing.T) {
 		t.Errorf("git got args %q, want %q", recorded, want)
 	}
 }
+
+func TestPollerCollectsOnlyForReaders(t *testing.T) {
+	dir := tempDir(t)
+	initRepo(t, dir)
+	p := Start(dir, 10*time.Millisecond, nil)
+	defer p.Stop()
+
+	// Start's own collect is the only one anybody asked for.
+	if got := p.collectCount(); got != 1 {
+		t.Fatalf("collects after Start = %d, want 1", got)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if got := p.collectCount(); got != 1 {
+		t.Errorf("collects after ~15 unread ticks = %d, want 1", got)
+	}
+
+	p.Snapshot()
+	waitFor(t, "the read to arm one collect", func() bool { return p.collectCount() == 2 })
+	time.Sleep(150 * time.Millisecond)
+	if got := p.collectCount(); got != 2 {
+		t.Errorf("collects after a single read = %d, want 2 (one read arms one collect)", got)
+	}
+}

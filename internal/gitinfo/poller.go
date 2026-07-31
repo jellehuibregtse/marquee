@@ -10,14 +10,21 @@ import (
 // serves the latest good one from cache. On git failure it keeps serving the
 // stale snapshot and logs once per distinct error, so a broken or missing git
 // never breaks the status endpoint.
+//
+// A tick collects only when the snapshot has been read since the last one, so the
+// git subprocesses follow the bar rather than the clock. Staleness is therefore
+// bounded by the tick plus the gap between reads.
 type Poller struct {
 	dir      string
 	interval time.Duration
 	logf     func(format string, args ...any)
 
-	mu      sync.Mutex
-	snap    Snapshot
-	lastErr string
+	mu               sync.Mutex
+	snap             Snapshot
+	lastErr          string
+	readSinceCollect bool
+	// collects counts collects, so a test can assert the ones that did not happen.
+	collects int
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -25,9 +32,9 @@ type Poller struct {
 }
 
 // Start collects a first snapshot synchronously (so status is never empty),
-// then refreshes every interval until Stop. A non-positive interval defaults
-// to 2s; a nil logf defaults to log.Printf. In a non-git dir the snapshot
-// stays zero and the poller keeps running.
+// then refreshes on every interval a read has armed, until Stop. A non-positive
+// interval defaults to 2s; a nil logf defaults to log.Printf. In a non-git dir
+// the snapshot stays zero and the poller keeps running.
 func Start(dir string, interval time.Duration, logf func(format string, args ...any)) *Poller {
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -47,10 +54,12 @@ func Start(dir string, interval time.Duration, logf func(format string, args ...
 	return p
 }
 
-// Snapshot returns the latest cached snapshot.
+// Snapshot returns the latest cached snapshot, and arms the next tick to
+// collect a fresh one.
 func (p *Poller) Snapshot() Snapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.readSinceCollect = true
 	return p.snap
 }
 
@@ -58,7 +67,9 @@ func (p *Poller) Snapshot() Snapshot {
 // refreshes immediately, so a caller (the worktree switcher) can point the
 // bar at a new worktree and have the very next status read reflect it. The
 // swap and the concurrent Snapshot reads are both guarded by the same mutex,
-// so a reader never observes a torn state.
+// so a reader never observes a torn state. It collects rather than arming a
+// tick, because the bar holds its switch overlay up until status reports the new
+// worktree.
 func (p *Poller) Repoint(dir string) {
 	p.mu.Lock()
 	p.dir = dir
@@ -81,9 +92,21 @@ func (p *Poller) loop() {
 		case <-p.stop:
 			return
 		case <-ticker.C:
-			p.refresh()
+			if p.takeReadSinceCollect() {
+				p.refresh()
+			}
 		}
 	}
+}
+
+// takeReadSinceCollect clears the flag as it reads it, so one read arms exactly
+// one collect.
+func (p *Poller) takeReadSinceCollect() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	read := p.readSinceCollect
+	p.readSinceCollect = false
+	return read
 }
 
 func (p *Poller) refresh() {
@@ -93,6 +116,7 @@ func (p *Poller) refresh() {
 	snap, err := collect(dir)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.collects++
 	if err != nil {
 		if err.Error() != p.lastErr {
 			p.lastErr = err.Error()
@@ -102,4 +126,10 @@ func (p *Poller) refresh() {
 	}
 	p.lastErr = ""
 	p.snap = snap
+}
+
+func (p *Poller) collectCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.collects
 }

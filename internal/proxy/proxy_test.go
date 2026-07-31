@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -619,5 +620,64 @@ func TestUpstreamDiesMidRunServesStartingPage(t *testing.T) {
 	}
 	if strings.Contains(string(body), "refresh") {
 		t.Fatalf("after upstream death (non-HTML): got the HTML page: %q", body)
+	}
+}
+
+func TestUpstreamTransportIsNotTheSharedDefault(t *testing.T) {
+	h := newHandler(t, freePort(t), Config{})
+
+	transport, ok := h.reverse.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("reverse.Transport = %T, want *http.Transport", h.reverse.Transport)
+	}
+	if transport == http.DefaultTransport {
+		t.Fatal("reverse.Transport is http.DefaultTransport; a restarting child needs its own pooling")
+	}
+	if transport.IdleConnTimeout != idleUpstreamConnTTL {
+		t.Errorf("IdleConnTimeout = %s, want %s", transport.IdleConnTimeout, idleUpstreamConnTTL)
+	}
+	if transport.MaxIdleConnsPerHost != maxIdleUpstreamConns {
+		t.Errorf("MaxIdleConnsPerHost = %d, want %d", transport.MaxIdleConnsPerHost, maxIdleUpstreamConns)
+	}
+	// The clone must keep the defaults it is not overriding, or tuning the pool
+	// would silently cost the dialer and the negotiated protocol.
+	if transport.DialContext == nil {
+		t.Error("the clone lost DialContext")
+	}
+	if !transport.ForceAttemptHTTP2 {
+		t.Error("the clone lost ForceAttemptHTTP2")
+	}
+}
+
+func TestUpstreamConnectionIsReusedBetweenRequests(t *testing.T) {
+	var mu sync.Mutex
+	peers := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		peers[r.RemoteAddr]++
+		mu.Unlock()
+		_, _ = io.WriteString(w, "alive")
+	}))
+	defer upstream.Close()
+
+	// A long TTL keeps the liveness probe to a single dial. It carries no request,
+	// so it never reaches the handler and cannot be counted as a peer either way.
+	h := newHandler(t, upstreamPort(t, upstream), Config{ProbeTTL: time.Hour})
+	proxySrv := httptest.NewServer(h)
+	defer proxySrv.Close()
+
+	for i := range 2 {
+		resp, err := http.Get(proxySrv.URL + "/")
+		if err != nil {
+			t.Fatalf("request %d: %v", i+1, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(peers) != 1 {
+		t.Errorf("upstream saw %d connections for 2 sequential requests, want 1 reused: %v", len(peers), peers)
 	}
 }

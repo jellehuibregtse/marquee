@@ -119,6 +119,7 @@ func New(cfg Config) *Handler {
 	}
 	h.internal.HandleFunc("GET /__marquee/toggle", switches.handleToggle)
 	h.reverse = &httputil.ReverseProxy{
+		Transport: upstreamTransport(),
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 			r.Out.Host = r.In.Host
@@ -142,6 +143,26 @@ func New(cfg Config) *Handler {
 		},
 	}
 	return h
+}
+
+// The upstream restarts under marquee's feet on every switch, and a pooled
+// connection that outlives its server is only discovered to be dead by writing a
+// request onto it, which a POST cannot survive (Go replays no request with a
+// body). So keep an idle connection barely longer than the gap between a page's
+// own requests, and pool a browser's worth of them rather than
+// http.DefaultTransport's two.
+const (
+	idleUpstreamConnTTL  = 2 * time.Second
+	maxIdleUpstreamConns = 32
+)
+
+// upstreamTransport clones http.DefaultTransport so every default it is not
+// overriding (dialer, HTTP/2 attempt, handshake timeouts) survives.
+func upstreamTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.IdleConnTimeout = idleUpstreamConnTTL
+	t.MaxIdleConnsPerHost = maxIdleUpstreamConns
+	return t
 }
 
 // Internal returns the guarded mux for the /__marquee/ namespace. Later

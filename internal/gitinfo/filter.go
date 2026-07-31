@@ -34,11 +34,11 @@ func NewWorktreeFilter(globs []string) (WorktreeFilter, error) {
 	return WorktreeFilter{globs: append([]string(nil), globs...)}, nil
 }
 
-// Apply returns the worktrees that are switch targets, in git's own order. With
-// no patterns every worktree stays a target. The main worktree, which git lists
-// first, is kept whatever the patterns say: switching back to main is the escape
-// hatch out of a dirty or broken worktree (the one switch that skips the
-// dirty-confirm gate), so no pattern may take it away.
+// Apply returns the worktrees that are switch targets, in the order it was given
+// them. With no patterns every worktree stays a target. The main worktree, which
+// is always first, is kept whatever the patterns say: switching back to main is
+// the escape hatch out of a dirty or broken worktree (the one switch that skips
+// the dirty-confirm gate), so no pattern may take it away.
 func (f WorktreeFilter) Apply(worktrees []Worktree) []Worktree {
 	if len(f.globs) == 0 {
 		return worktrees

@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -63,6 +65,12 @@ func collect(dir string) (Snapshot, error) {
 	if len(worktrees) > 0 {
 		mainPath = worktrees[0].Path
 	}
+	// Recency is a nicety layered on the snapshot, so a for-each-ref failure
+	// leaves git's own order in place instead of failing the collect and freezing
+	// the poller on a stale branch and dirty flag.
+	if refs, refErr := runGit(dir, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"); refErr == nil {
+		worktrees = orderByRecency(worktrees, refs)
+	}
 	return Snapshot{
 		Branch: branch,
 		Dirty:  status != "",
@@ -114,4 +122,49 @@ func parseWorktrees(out string) []Worktree {
 		worktrees = append(worktrees, wt)
 	}
 	return worktrees
+}
+
+// orderByRecency reorders a worktree list so the trees someone is actually
+// working in are the ones at the top of the bar's menu: the main worktree keeps
+// git's leading position, and the rest follow their branch's last commit,
+// newest first. A worktree with no dated branch — a detached HEAD, or a branch
+// whose ref for-each-ref did not list — sorts last, so it has a defined place
+// instead of wherever git happened to emit it.
+//
+// The main worktree stays pinned because being first is load-bearing, not
+// cosmetic: collect reads worktrees[0] to decide IsMain, and WorktreeFilter
+// keeps index 0 whatever the --worktree-glob patterns say, so switching back to
+// main survives as the escape hatch. Recency would also be the wrong signal for
+// it — main is the tree you return to, not the one you just committed on.
+//
+// refs is `for-each-ref --sort=-committerdate` output, one short refname per
+// line, most recent first.
+func orderByRecency(worktrees []Worktree, refs string) []Worktree {
+	rank := make(map[string]int)
+	for i, line := range strings.Split(refs, "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			rank[name] = i
+		}
+	}
+	ordered := append([]Worktree(nil), worktrees...)
+	rest := ordered
+	if len(rest) > 0 {
+		rest = rest[1:]
+	}
+	// A stable sort keeps git's order between worktrees that tie, which is every
+	// undated one and any pair sharing a branch.
+	sort.SliceStable(rest, func(i, j int) bool {
+		return recencyRank(rest[i], rank) < recencyRank(rest[j], rank)
+	})
+	return ordered
+}
+
+func recencyRank(wt Worktree, rank map[string]int) int {
+	if wt.Branch == "" {
+		return math.MaxInt
+	}
+	if i, ok := rank[wt.Branch]; ok {
+		return i
+	}
+	return math.MaxInt
 }

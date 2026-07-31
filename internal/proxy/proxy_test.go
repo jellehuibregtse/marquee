@@ -681,3 +681,152 @@ func TestUpstreamConnectionIsReusedBetweenRequests(t *testing.T) {
 		t.Errorf("upstream saw %d connections for 2 sequential requests, want 1 reused: %v", len(peers), peers)
 	}
 }
+
+func TestTransientProbeFailureDoesNotRefuseAWorkingUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "alive")
+	}))
+	defer upstream.Close()
+
+	// A long TTL makes the poisoned result stick, the way a real 500ms window
+	// would for every request that lands inside it.
+	h := newHandler(t, upstreamPort(t, upstream), Config{ProbeTTL: time.Hour})
+	proxySrv := httptest.NewServer(h)
+	defer proxySrv.Close()
+
+	resp, err := http.Get(proxySrv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first request: status = %d, want 200", resp.StatusCode)
+	}
+
+	// Exactly what a lost dial race or a single upstream error does to the cache.
+	h.probe.markDown()
+
+	resp, err = http.Get(proxySrv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("after a poisoned probe: status = %d, want 200 (the upstream is up)", resp.StatusCode)
+	}
+	if string(body) != "alive" {
+		t.Fatalf("after a poisoned probe: body = %q, want the upstream's own response", body)
+	}
+}
+
+func TestProbeStillGatesBeforeTheUpstreamHasAnswered(t *testing.T) {
+	port := freePort(t)
+	h := newHandler(t, port, Config{ProbeTTL: time.Hour})
+	proxySrv := httptest.NewServer(h)
+	defer proxySrv.Close()
+
+	if h.upstreamProven.Load() {
+		t.Fatal("upstreamProven is set before any request")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, proxySrv.URL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/html")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("closed port before any answer: status = %d, want 503", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), `http-equiv="refresh"`) {
+		t.Fatalf("closed port before any answer: got %q, want the starting page", body)
+	}
+}
+
+func TestOngoingUpstreamFailureIsLoggedOnce(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "alive")
+	}))
+	logs := &bytes.Buffer{}
+	h := newHandler(t, upstreamPort(t, upstream), Config{
+		ProbeTTL: time.Hour,
+		Logger:   log.New(logs, "", 0),
+	})
+	proxySrv := httptest.NewServer(h)
+	defer proxySrv.Close()
+
+	resp, err := http.Get(proxySrv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	upstream.Close()
+
+	// What a browser sitting on the interstitial does: the same doomed request,
+	// once a second, forever.
+	for i := range 5 {
+		resp, err := http.Get(proxySrv.URL + "/")
+		if err != nil {
+			t.Fatalf("request %d: %v", i+1, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	if got := strings.Count(logs.String(), "upstream error"); got != 1 {
+		t.Errorf("logged %d upstream errors for one ongoing fault, want 1:\n%s", got, logs.String())
+	}
+}
+
+func TestUpstreamFailureIsLoggedAgainAfterARecovery(t *testing.T) {
+	var down atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			// Abort with no response at all, which is what ErrorHandler is for.
+			panic(http.ErrAbortHandler)
+		}
+		_, _ = io.WriteString(w, "alive")
+	}))
+	defer upstream.Close()
+
+	logs := &bytes.Buffer{}
+	h := newHandler(t, upstreamPort(t, upstream), Config{
+		ProbeTTL: time.Hour,
+		Logger:   log.New(logs, "", 0),
+	})
+	proxySrv := httptest.NewServer(h)
+	defer proxySrv.Close()
+
+	get := func(step string) {
+		t.Helper()
+		resp, err := http.Get(proxySrv.URL + "/")
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	get("warm-up")
+	down.Store(true)
+	get("first failure")
+	down.Store(false)
+	get("recovery")
+	down.Store(true)
+	get("second failure")
+
+	if got := strings.Count(logs.String(), "upstream error"); got != 2 {
+		t.Errorf("logged %d upstream errors across two faults split by a success, want 2:\n%s", got, logs.String())
+	}
+}

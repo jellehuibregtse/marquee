@@ -79,6 +79,15 @@ type Handler struct {
 	// without importing (and cycling with) the switcher. Stored in an
 	// atomic.Value so reads stay race-free.
 	switchSrc atomic.Value
+
+	// upstreamProven records that the upstream has answered at least one request,
+	// which is what retires the liveness probe. See ServeHTTP.
+	upstreamProven atomic.Bool
+
+	// upstreamErr reports an upstream failure once per cause rather than once per
+	// request, since a dead upstream is hit by every request on the page plus one
+	// per second from the interstitial's own refresh.
+	upstreamErr *onceLogger
 }
 
 // SwitchSource reports the progress of an in-flight worktree switch. The switch
@@ -107,6 +116,7 @@ func New(cfg Config) *Handler {
 	// Read once at startup; injection decisions never consult the
 	// environment at request time.
 	switches := newBarSwitches(os.Getenv("MARQUEE_DISABLE_BAR") == "1")
+	inject := newInjector(logger, switches, cfg.RelaxCSP, cfg.SwitchToken)
 
 	h := &Handler{
 		internal: NewInternalMux(cfg.AllowHosts...),
@@ -115,7 +125,8 @@ func New(cfg Config) *Handler {
 			timeout: defaultDuration(cfg.ProbeTimeout, 250*time.Millisecond),
 			ttl:     defaultDuration(cfg.ProbeTTL, 500*time.Millisecond),
 		},
-		logger: logger,
+		logger:      logger,
+		upstreamErr: newOnceLogger(logger),
 	}
 	h.internal.HandleFunc("GET /__marquee/toggle", switches.handleToggle)
 	h.reverse = &httputil.ReverseProxy{
@@ -133,11 +144,16 @@ func New(cfg Config) *Handler {
 			// The app never sees marquee plumbing.
 			r.Out.Header.Del("X-Marquee")
 		},
-		FlushInterval:  -1,
-		ModifyResponse: newInjector(logger, switches, cfg.RelaxCSP, cfg.SwitchToken).modifyResponse,
-		ErrorLog:       logger,
+		FlushInterval: -1,
+		ModifyResponse: func(resp *http.Response) error {
+			// Reaching here means the upstream produced a response.
+			h.upstreamProven.Store(true)
+			h.upstreamErr.forget()
+			return inject.modifyResponse(resp)
+		},
+		ErrorLog: logger,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			logger.Printf("marquee: upstream error for %s %s: %v", r.Method, r.URL.Path, err)
+			h.upstreamErr.logCause(err, "upstream error for %s %s: %v", r.Method, r.URL.Path, err)
 			h.probe.markDown()
 			serveStarting(w, r)
 		},
@@ -198,7 +214,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serveSwitching(w, r, slug)
 		return
 	}
-	if !h.probe.up() {
+	// Probing is a cold-start affordance, not a health check: a dial that loses its
+	// race against a busy-but-working upstream reads exactly like a closed port. So
+	// it only stands in until the upstream has answered, after which ErrorHandler
+	// serves the same page on evidence rather than on a dial.
+	if !h.upstreamProven.Load() && !h.probe.up() {
 		serveStarting(w, r)
 		return
 	}
@@ -253,7 +273,8 @@ func defaultDuration(d, fallback time.Duration) time.Duration {
 }
 
 // probe caches a TCP liveness check of the upstream so every request does
-// not pay a dial.
+// not pay a dial. It is consulted only until the upstream first answers; see
+// Handler.upstreamProven.
 type probe struct {
 	addr    string
 	timeout time.Duration
@@ -286,7 +307,9 @@ func (p *probe) up() bool {
 }
 
 // markDown invalidates a cached "up" so requests right after an upstream
-// failure see the starting page instead of piling onto a dead port.
+// failure see the starting page instead of piling onto a dead port. It bites
+// only before the upstream has ever answered, the window where a failure most
+// likely means "still booting".
 func (p *probe) markDown() {
 	p.mu.Lock()
 	p.lastUp = false

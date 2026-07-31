@@ -108,7 +108,21 @@ func main() {
 }
 
 func run() int {
-	opts, err := parseArgs(os.Args[0], os.Args[1:], os.Stderr)
+	// The launch directory is read before the flags are, because the conventions
+	// marquee reads (.marquee/config here, .marquee/hook below) live in it, and the
+	// config file's flags have to be in hand before anything is parsed.
+	workdir, err := os.Getwd()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "marquee: could not determine working directory: %v\n", err)
+		return 1
+	}
+	configArgs, err := loadConfigArgs(workdir)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "marquee: %v\n", err)
+		return 2
+	}
+
+	opts, err := parseArgsWithConfig(os.Args[0], configArgs, os.Args[1:], os.Stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -117,16 +131,13 @@ func run() int {
 	}
 
 	log := newLogger(os.Stderr, opts.quiet)
+	if len(configArgs) > 0 {
+		log.Info("took flags from %s", configPath(workdir))
+	}
 
 	if opts.showVersion {
 		fmt.Printf("marquee %s (commit %s, built %s)\n", version, commit, date)
 		return 0
-	}
-
-	workdir, err := os.Getwd()
-	if err != nil {
-		log.Error("could not determine working directory: %v", err)
-		return 1
 	}
 
 	unsafeAllowed, err := validateListen(opts.listen, opts.unsafeListen)

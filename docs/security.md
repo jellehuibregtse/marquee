@@ -671,14 +671,17 @@ there, from `internal/hook` (the one unit `cmd/marquee` and the switch
 orchestrator share), via
 `hook.OperatorCommand` (`exec.CommandContext(ctx, "sh", "-c", hookCmd)` plus the
 process group), bounded on two axes that run inside the same in-flight switch and
-busy lock as the rest of the switch: an **idle timeout** (`hook.DefaultIdleTimeout`,
-10 minutes) that kills the group when the hook has written nothing at all for that
-long, and `--hook-timeout` (`hook.DefaultTimeout`, 60 minutes) as the absolute
+busy lock as the rest of the switch: an **idle timeout** (`--hook-idle-timeout`,
+`hook.DefaultIdleTimeout`, 10 minutes) that kills the group when the hook has
+written nothing at all for that long, and `--hook-timeout` (`hook.DefaultTimeout`,
+60 minutes) as the absolute
 ceiling on one run. Both are backstops against a hook that will never finish, not
 tests of whether it is working: silence proves nothing either way, so the idle
 bound is set generously rather than tuned to catch a wedge quickly, and a fixed
 total budget is no better because it kills a cold dependency install for being
-slow. Every write to the hook's output resets the idle timer, so the bound only
+slow. How long a legitimate silence lasts is a property of the repo's own
+bootstrap, so both bounds are operator knobs; an idle period above the ceiling is
+refused at parse time, since it could never fire. Every write to the hook's output resets the idle timer, so the bound only
 fires on a stretch of total quiet. Both are set high enough that they should not
 fire on real work, and a hook killed by either says in its error which one it was. Its stdout and stderr are
 streamed to marquee's stderr as it runs, prefixed `switch-hook: …`, so the

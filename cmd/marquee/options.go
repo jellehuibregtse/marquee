@@ -78,28 +78,29 @@ func checkTimeout(name string, d time.Duration) error {
 }
 
 type options struct {
-	listen         string
-	internalPort   int
-	position       string
-	size           string
-	theme          string
-	pillsRaw       string
-	pills          []string
-	open           bool
-	quiet          bool
-	allowHosts     []string
-	unsafeListen   bool
-	keepCSP        bool
-	switchHook     string
-	switchHookSet  bool
-	readyCmd       string
-	worktreeGlobs  []string
-	worktreeFilter gitinfo.WorktreeFilter
-	hookTimeout    time.Duration
-	healthTimeout  time.Duration
-	restartTimeout time.Duration
-	showVersion    bool
-	command        []string
+	listen          string
+	internalPort    int
+	position        string
+	size            string
+	theme           string
+	pillsRaw        string
+	pills           []string
+	open            bool
+	quiet           bool
+	allowHosts      []string
+	unsafeListen    bool
+	keepCSP         bool
+	switchHook      string
+	switchHookSet   bool
+	readyCmd        string
+	worktreeGlobs   []string
+	worktreeFilter  gitinfo.WorktreeFilter
+	hookTimeout     time.Duration
+	hookIdleTimeout time.Duration
+	healthTimeout   time.Duration
+	restartTimeout  time.Duration
+	showVersion     bool
+	command         []string
 }
 
 // stringList collects a repeatable string flag (e.g. --allow-host a
@@ -137,6 +138,7 @@ func newRunFlagSet(name string, out io.Writer) (*flag.FlagSet, *options) {
 	fs.Var((*stringList)(&opts.worktreeGlobs), "worktree-glob", "glob matched against a worktree's absolute path; when given, only matching worktrees (plus the main one) are switch targets (repeatable)")
 	fs.StringVar(&opts.readyCmd, "ready-cmd", "", "command retried in the target worktree after the child's port answers, until it exits 0 or --health-timeout expires (e.g. \"curl -sf localhost:3036\"); empty disables it")
 	fs.DurationVar(&opts.hookTimeout, "hook-timeout", hook.DefaultTimeout, "absolute ceiling on one --switch-hook run before its process group is killed; a hook that goes quiet is killed long before this, e.g. 90m")
+	fs.DurationVar(&opts.hookIdleTimeout, "hook-idle-timeout", hook.DefaultIdleTimeout, "how long a --switch-hook run may print nothing at all before its process group is killed; raise it for a bootstrap with a longer silent step, e.g. 20m")
 	fs.DurationVar(&opts.healthTimeout, "health-timeout", switcher.DefaultHealthTimeout, "how long to wait for a restarted child to become healthy before the switch reverts, e.g. 90s")
 	fs.DurationVar(&opts.restartTimeout, "restart-timeout", switcher.DefaultRestartTimeout, "how long a single stop-and-spawn of the child may take, e.g. 60s")
 	fs.BoolVar(&opts.showVersion, "version", false, "print version and exit")
@@ -196,6 +198,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 		value time.Duration
 	}{
 		{"--hook-timeout", opts.hookTimeout},
+		{"--hook-idle-timeout", opts.hookIdleTimeout},
 		{"--health-timeout", opts.healthTimeout},
 		{"--restart-timeout", opts.restartTimeout},
 	} {
@@ -203,6 +206,16 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 			_, _ = fmt.Fprintf(out, "marquee: %v\n", err)
 			return nil, errUsage
 		}
+	}
+	// An idle period longer than the ceiling can never fire, so the operator who
+	// raised it would still get the hook killed at the ceiling and be told the whole
+	// bootstrap was too long, which is the wrong diagnosis. Refuse it here instead:
+	// whoever needs a longer silence almost always needs a longer run too, and
+	// raising one without the other is a mistake worth naming. Equal values are
+	// allowed; both bounds then land together and either message is true.
+	if opts.hookIdleTimeout > opts.hookTimeout {
+		_, _ = fmt.Fprintf(out, "marquee: invalid --hook-idle-timeout %s: it exceeds the --hook-timeout ceiling of %s, so it could never fire; raise --hook-timeout too\n", opts.hookIdleTimeout, opts.hookTimeout)
+		return nil, errUsage
 	}
 	if !opts.showVersion && len(opts.command) == 0 {
 		fs.Usage()

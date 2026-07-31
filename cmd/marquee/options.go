@@ -90,6 +90,7 @@ type options struct {
 	unsafeListen   bool
 	keepCSP        bool
 	switchHook     string
+	switchHookSet  bool
 	readyCmd       string
 	worktreeGlobs  []string
 	worktreeFilter gitinfo.WorktreeFilter
@@ -127,7 +128,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen, exposing the proxy to the network")
 	fs.BoolVar(&opts.keepCSP, "keep-csp", false, "leave the app's Content-Security-Policy untouched (the bar may not load if its CSP forbids same-origin scripts)")
-	fs.StringVar(&opts.switchHook, "switch-hook", "", "command run in a worktree before the child starts there, including at startup in the worktree marquee is launched in (e.g. \"bundle install\"); empty disables it")
+	fs.StringVar(&opts.switchHook, "switch-hook", "", "command run in a worktree before the child starts there, including at startup in the worktree marquee is launched in (e.g. \"bundle install\"); defaults to .marquee/hook when that is executable, and an empty value disables it")
 	fs.Var((*stringList)(&opts.worktreeGlobs), "worktree-glob", "glob matched against a worktree's absolute path; when given, only matching worktrees (plus the main one) are switch targets (repeatable)")
 	fs.StringVar(&opts.readyCmd, "ready-cmd", "", "command retried in the target worktree after the child's port answers, until it exits 0 or --health-timeout expires (e.g. \"curl -sf localhost:3036\"); empty disables it")
 	fs.DurationVar(&opts.hookTimeout, "hook-timeout", hook.DefaultTimeout, "how long --switch-hook may run on any leg before its process group is killed, e.g. 20m")
@@ -143,6 +144,14 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 		return nil, err
 	}
 	opts.command = fs.Args()
+	// Whether --switch-hook was given at all is the difference between "use the
+	// conventional .marquee/hook" and "run no hook", since both read as an empty
+	// command string.
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "switch-hook" {
+			opts.switchHookSet = true
+		}
+	})
 
 	if !knob.Default.Positions.Valid(opts.position) {
 		_, _ = fmt.Fprintf(out, "marquee: invalid --position %q: must be one of %s\n", opts.position, knob.Default.Positions.List())

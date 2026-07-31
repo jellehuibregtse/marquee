@@ -90,9 +90,9 @@ type Config struct {
 	// Timeout is the absolute ceiling on one run; zero means DefaultTimeout.
 	Timeout time.Duration
 	// IdleTimeout is how long the run may produce no output before it is killed;
-	// zero means DefaultIdleTimeout. It is not an operator knob — there is no flag
-	// for it, because a hook that has gone quiet is hung whatever the operator
-	// believes — so the only reason to set it is a test that cannot wait minutes.
+	// zero means DefaultIdleTimeout. It comes from --hook-idle-timeout, because how
+	// long a legitimate silence lasts is a property of the repo's own bootstrap and
+	// only the repo knows it.
 	IdleTimeout time.Duration
 	// Logf receives the hook's output while it runs, so the operator watches a
 	// bootstrap happen. It is ordinary informational output, which marquee's

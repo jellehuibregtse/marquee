@@ -199,10 +199,11 @@ func run() int {
 		log.Warn("%s", hookWarning)
 	}
 	switchHook := hook.New(hook.Config{
-		Command: hookCommand,
-		Timeout: opts.hookTimeout,
-		Logf:    func(format string, args ...any) { log.Info(format, args...) },
-		Errf:    func(format string, args ...any) { log.Error(format, args...) },
+		Command:     hookCommand,
+		Timeout:     opts.hookTimeout,
+		IdleTimeout: opts.hookIdleTimeout,
+		Logf:        func(format string, args ...any) { log.Info(format, args...) },
+		Errf:        func(format string, args ...any) { log.Error(format, args...) },
 	})
 	// The hook is the only consumer of the launch worktree's slug, so asking git
 	// for it is only worth a subprocess when there is a hook to receive it.

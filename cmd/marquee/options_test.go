@@ -287,6 +287,9 @@ func TestParseArgsSwitchTimeoutDefaults(t *testing.T) {
 	if opts.hookTimeout != hook.DefaultTimeout {
 		t.Errorf("hookTimeout = %s, want %s", opts.hookTimeout, hook.DefaultTimeout)
 	}
+	if opts.hookIdleTimeout != hook.DefaultIdleTimeout {
+		t.Errorf("hookIdleTimeout = %s, want %s", opts.hookIdleTimeout, hook.DefaultIdleTimeout)
+	}
 	if opts.healthTimeout != switcher.DefaultHealthTimeout {
 		t.Errorf("healthTimeout = %s, want %s", opts.healthTimeout, switcher.DefaultHealthTimeout)
 	}
@@ -297,13 +300,16 @@ func TestParseArgsSwitchTimeoutDefaults(t *testing.T) {
 
 func TestParseArgsSwitchTimeoutsCaptured(t *testing.T) {
 	opts, err := parseArgs("marquee",
-		[]string{"--hook-timeout", "25m", "--health-timeout", "90s", "--restart-timeout", "1m30s",
+		[]string{"--hook-timeout", "25m", "--hook-idle-timeout", "20m", "--health-timeout", "90s", "--restart-timeout", "1m30s",
 			"--", "bin/dev"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
 	}
 	if opts.hookTimeout != 25*time.Minute {
 		t.Errorf("hookTimeout = %s, want 25m", opts.hookTimeout)
+	}
+	if opts.hookIdleTimeout != 20*time.Minute {
+		t.Errorf("hookIdleTimeout = %s, want 20m", opts.hookIdleTimeout)
 	}
 	if opts.healthTimeout != 90*time.Second {
 		t.Errorf("healthTimeout = %s, want 90s", opts.healthTimeout)
@@ -314,7 +320,7 @@ func TestParseArgsSwitchTimeoutsCaptured(t *testing.T) {
 }
 
 func TestParseArgsRejectsNonPositiveSwitchTimeouts(t *testing.T) {
-	for _, flagName := range []string{"--hook-timeout", "--health-timeout", "--restart-timeout"} {
+	for _, flagName := range []string{"--hook-timeout", "--hook-idle-timeout", "--health-timeout", "--restart-timeout"} {
 		for _, value := range []string{"0", "0s", "-1s"} {
 			var buf bytes.Buffer
 			_, err := parseArgs("marquee", []string{flagName, value, "--", "bin/dev"}, &buf)
@@ -325,6 +331,34 @@ func TestParseArgsRejectsNonPositiveSwitchTimeouts(t *testing.T) {
 				t.Errorf("%s %s: missing error message: %q", flagName, value, out)
 			}
 		}
+	}
+}
+
+// An idle period above the ceiling can never fire, so it is refused rather than
+// accepted as a bound that does nothing.
+func TestParseArgsRejectsAnIdleTimeoutAboveTheCeiling(t *testing.T) {
+	var buf bytes.Buffer
+	if _, err := parseArgs("marquee", []string{"--hook-timeout", "30m", "--hook-idle-timeout", "45m", "--", "bin/dev"}, &buf); err == nil {
+		t.Fatal("parseArgs accepted an idle timeout above the ceiling")
+	}
+	if out := buf.String(); !strings.Contains(out, "invalid --hook-idle-timeout") || !strings.Contains(out, "never fire") {
+		t.Errorf("missing error message: %q", out)
+	}
+}
+
+// The two may be equal: both bounds then land at the same moment, which is a
+// coherent thing to ask for and not worth refusing.
+func TestParseArgsAcceptsAnIdleTimeoutEqualToTheCeiling(t *testing.T) {
+	if _, err := parseArgs("marquee", []string{"--hook-timeout", "30m", "--hook-idle-timeout", "30m", "--", "bin/dev"}, io.Discard); err != nil {
+		t.Fatalf("parseArgs rejected equal hook bounds: %v", err)
+	}
+}
+
+// The default idle period has to fit under the default ceiling, or an operator
+// who touches neither flag gets a usage error.
+func TestTheDefaultHookBoundsAreConsistent(t *testing.T) {
+	if _, err := parseArgs("marquee", []string{"--", "bin/dev"}, io.Discard); err != nil {
+		t.Fatalf("parseArgs rejected the built-in hook bounds: %v", err)
 	}
 }
 

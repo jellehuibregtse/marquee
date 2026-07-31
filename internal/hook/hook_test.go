@@ -108,11 +108,11 @@ func TestTheCeilingKillsTheWholeHookProcessGroup(t *testing.T) {
 	}
 }
 
-// A hook that has gone quiet is treated as hung: the idle timeout kills it well
-// inside the ceiling and takes the whole process group with it, so nothing it
-// spawned is left behind. The failure has to say silence killed it, because that
-// points at the step the hook was stuck on, and it still has to carry the hook's
-// own last words.
+// A hook silent past its idle timeout is killed well inside the ceiling, and the
+// kill takes the whole process group with it so nothing it spawned is left
+// behind. The failure has to say silence killed it, because that names a
+// different problem than running out of total time, and it still has to carry the
+// hook's own last words.
 //
 // The durations here are scaled down; the real idle timeout is DefaultIdleTimeout.
 func TestSilenceKillsTheHookAndItsProcessGroup(t *testing.T) {
@@ -178,8 +178,8 @@ func TestTheCeilingKillsAHookThatNeverStopsTalking(t *testing.T) {
 }
 
 // The defect the idle timeout replaced: a hook doing real work was killed at a
-// fixed total budget, mid-build, for being slow. Output is what proves a hook
-// alive, so one that keeps printing runs to completion however long it takes —
+// fixed total budget, mid-build, for being slow. Every write resets the idle
+// timer, so a hook that keeps printing runs to completion however long it takes,
 // here several times over its own idle timeout.
 func TestAHookThatKeepsPrintingIsNotKilled(t *testing.T) {
 	dir := t.TempDir()

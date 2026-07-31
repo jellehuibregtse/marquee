@@ -31,6 +31,12 @@ const sizeUsage = "how large the bar renders: small, medium, or large"
 
 const themeUsage = "the bar's color theme: default, midnight, sand, or forest"
 
+// openUsage documents the opt-in browser launch. marquee is a long-lived proxy in
+// front of a dev stack, usually started once per day from a process manager or a
+// terminal that is then left alone, so a browser window it opens by itself is a
+// window nobody asked for.
+const openUsage = "open the browser once the app is healthy (off unless asked for)"
+
 // pillsUsage documents the --pills list. The list order is the render order, an
 // omitted id is hidden, and an empty value hides all pills.
 const pillsUsage = "which info pills to show, comma-separated over branch,dirty,worktree,pr (list order = render order; omit an id to hide it; empty hides all)"
@@ -78,7 +84,7 @@ type options struct {
 	size           string
 	theme          string
 	pills          []string
-	noOpen         bool
+	open           bool
 	quiet          bool
 	allowHosts     []string
 	unsafeListen   bool
@@ -116,7 +122,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.StringVar(&opts.theme, "theme", knob.Default.Themes.Default, themeUsage)
 	var pillsRaw string
 	fs.StringVar(&pillsRaw, "pills", knob.Default.Pills.Default, pillsUsage)
-	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the app is healthy")
+	fs.BoolVar(&opts.open, "open", false, openUsage)
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen, exposing the proxy to the network")
@@ -193,7 +199,7 @@ type attachOptions struct {
 	size         string
 	theme        string
 	pills        []string
-	noOpen       bool
+	open         bool
 	quiet        bool
 	allowHosts   []string
 	unsafeListen bool
@@ -211,7 +217,7 @@ func parseAttachArgs(name string, args []string, out io.Writer) (*attachOptions,
 	fs.StringVar(&opts.theme, "theme", knob.Default.Themes.Default, themeUsage)
 	var pillsRaw string
 	fs.StringVar(&pillsRaw, "pills", knob.Default.Pills.Default, pillsUsage)
-	fs.BoolVar(&opts.noOpen, "no-open", false, "do not open the browser once the upstream is healthy")
+	fs.BoolVar(&opts.open, "open", false, openUsage)
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
 	fs.BoolVar(&opts.unsafeListen, "unsafe-listen", false, "allow a non-loopback --listen and --upstream, exposing the proxy to the network")

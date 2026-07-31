@@ -72,7 +72,7 @@ Everything after `--` is your command, run verbatim.
 | `--size` | `medium` | Bar size preset: `small`, `medium`, `large`. |
 | `--theme` | `default` | Bar theme: `default` (matches your light/dark scheme), `midnight`, `sand`, `forest`. |
 | `--pills` | `branch,dirty,worktree,pr` | Which info pills to show and in what order (comma-separated). Omit an id to hide it; empty hides all. |
-| `--no-open` | off | Don't open the browser on startup. |
+| `--open` | off | Open the browser once the app is up. Off by default: marquee is usually left running all day under a process manager, and a window it opens by itself is one nobody asked for. |
 | `--quiet` | off | Suppress marquee's own log lines. |
 | `--allow-host` | — | Add a hostname to the internal-endpoint allowlist (repeatable). |
 | `--switch-hook` | — | Command run in a worktree before the child starts there, e.g. `"bundle install"`, including the worktree marquee itself is launched in. Bootstraps a fresh worktree; see [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |

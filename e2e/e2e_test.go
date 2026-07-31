@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -145,8 +146,29 @@ type marqueeProc struct {
 	baseURL      string
 	internalPort int
 	// output holds everything marquee wrote, so a test can assert on the message
-	// it printed. Read it only after the process has exited.
-	output *bytes.Buffer
+	// it printed, including while the process is still running.
+	output *syncBuffer
+}
+
+// syncBuffer collects marquee's output for assertions. The exec copier goroutine
+// writes to it for as long as the process lives, so both ends take the lock. A
+// test asserting on a line marquee printed at startup reads it while that
+// goroutine is still going, which over a bare bytes.Buffer is a data race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // startMarquee launches the real marquee binary wrapping testupstream,
@@ -183,7 +205,7 @@ func startMarqueeWith(repo string, flags []string, childArgv []string) (*marquee
 	args = append(args, childArgv...)
 	cmd := exec.Command(marqueeBin, args...)
 	cmd.Dir = repo
-	out := &bytes.Buffer{}
+	out := &syncBuffer{}
 	cmd.Stdout = io.MultiWriter(os.Stderr, out)
 	cmd.Stderr = cmd.Stdout
 	if err := cmd.Start(); err != nil {

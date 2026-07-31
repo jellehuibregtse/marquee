@@ -720,6 +720,20 @@ the hook starts: SIGINT or SIGTERM during a bootstrap cancels the hook's context
 which SIGKILLs its process group, so an interrupted bootstrap leaves nothing
 running behind it. Attach mode has no child and never runs the hook.
 
+**Shutdown cancels a hook on the switch and revert legs too.** Those two legs run
+the hook under the switch's own context, which is deliberately a background one so
+a client disconnect cannot strand the child mid-switch — which also meant nothing
+cancelled them when marquee went away. Interrupting a switch therefore left the
+bootstrap script running detached, with no marquee left to own its process group
+and nothing bounding it but the hook's own timeouts. `cmd/marquee` now closes a
+`shutdown` channel on every path out of `run`, `OrchestratorConfig.Shutdown`
+carries it to the orchestrator, and `Orchestrator.runHook` folds it into the
+context of every leg's hook, so the group kill in `hook.OperatorCommand` happens
+for an interrupted switch exactly as it does for an interrupted startup. Shutdown
+then waits (`Orchestrator.WaitHooks`, bounded by the same 10s stop budget) for the
+run to return, because the kill is what returning proves; exiting straight after
+closing the channel would race it.
+
 **Reclaiming the internal port on a switch (kill-by-port).** marquee stops the
 child by killing its whole process group. A manager such as `overmind` or a
 `tmux`-based runner daemonizes its server into a *separate* session, so that
@@ -882,6 +896,9 @@ with a fixed token, and no golden encodes the random value.
   `TestExitNotReportedOnStop`, `TestExitNotReportedDuringRestart` (`-race`),
   `TestExitReportedAfterRestartOnNaturalDeath` in
   `internal/runner/terminated_test.go`;
+  `TestShutdownCancelsAnInFlightSwitchHook` (a shutdown mid-switch kills the
+  hook's whole process group rather than detaching it, and is waited on) in
+  `internal/switcher/switcher_test.go`;
   `TestSwitchingPageServedWhileSwitching`, `TestSwitchingPageEscapesSlug`,
   `TestSwitchingProbeAbsentBehavesNormally` in
   `internal/proxy/switch_test.go`; `TestPollerRepointSwitchesDirectory`

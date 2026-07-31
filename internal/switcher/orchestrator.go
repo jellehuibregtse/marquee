@@ -141,6 +141,13 @@ type OrchestratorConfig struct {
 	// is CLI input, never request- or slug-derived. Empty disables it. See
 	// docs/security.md, Threat 4.
 	ReadyCmd string
+	// Shutdown is closed by main when marquee is going away (a signal, a dead child,
+	// a server error). Closing it cancels an in-flight hook's context, which kills
+	// the hook's process group, so a Ctrl-C in the middle of a switch does not leave
+	// a bootstrap script running with no marquee left to own it. Nil leaves the hook
+	// bound only by the switch's own context, which is what a caller with no
+	// shutdown of its own (a test) wants.
+	Shutdown <-chan struct{}
 	// WorktreeFilter narrows git's worktree set to the operator's switch targets.
 	// Its zero value keeps all of them. Prepare applies it itself rather than
 	// trusting whoever filtered the list the bar was offered, so a hand-made
@@ -174,6 +181,12 @@ type Orchestrator struct {
 	hook           *hook.Runner
 	readyCmd       string
 	worktreeFilter gitinfo.WorktreeFilter
+
+	// shutdown ends every hook run the orchestrator starts, and hooks counts the
+	// runs in flight so shutdown can wait for the kill to land instead of racing
+	// marquee's own exit.
+	shutdown <-chan struct{}
+	hooks    sync.WaitGroup
 
 	mu sync.Mutex
 	// current is the worktree the child is running in, named as git names it. Both
@@ -218,6 +231,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		hook:           cfg.Hook,
 		readyCmd:       cfg.ReadyCmd,
 		worktreeFilter: cfg.WorktreeFilter,
+		shutdown:       cfg.Shutdown,
 		terminated:     make(chan struct{}),
 	}
 	if o.logger == nil {
@@ -329,7 +343,7 @@ func (o *Orchestrator) Switch(ctx context.Context, plan Plan) Result {
 	// process-manager socket and leave the dev server dead after what was only a
 	// harmless hook failure.
 	target := worktree{slug: plan.Slug, dir: plan.Path}
-	if err := o.hook.Run(ctx, hook.Invocation{
+	if err := o.runHook(ctx, hook.Invocation{
 		Leg:        hook.LegSwitch,
 		TargetSlug: target.slug,
 		TargetDir:  target.dir,
@@ -444,7 +458,7 @@ func (o *Orchestrator) switchInto(ctx context.Context, tgt worktree, phaseSlug s
 // typed wrong), which would turn a reverted switch into a reported "the dev
 // server is down" while the previous worktree is in fact running again.
 func (o *Orchestrator) revertInto(ctx context.Context, prev, failed worktree) error {
-	if err := o.hook.Run(ctx, hook.Invocation{
+	if err := o.runHook(ctx, hook.Invocation{
 		Leg:        hook.LegRevert,
 		TargetSlug: prev.slug,
 		TargetDir:  prev.dir,
@@ -453,6 +467,48 @@ func (o *Orchestrator) revertInto(ctx context.Context, prev, failed worktree) er
 		o.logf("revert switch-hook in %q failed; restarting the previously-working worktree anyway: %v", prev.dir, err)
 	}
 	return o.switchInto(ctx, prev, failed.slug, false)
+}
+
+// runHook runs one leg's bootstrap hook with marquee's shutdown folded into its
+// context, so an interrupted switch takes the hook's process group down with it
+// rather than detaching a "bundle install" that keeps running against a worktree
+// nobody is switching into any more. The switch's own context does not carry
+// that: the HTTP handler deliberately passes a background one so a client
+// disconnect cannot strand the child mid-switch, which left shutdown with no way
+// in.
+func (o *Orchestrator) runHook(ctx context.Context, inv hook.Invocation) error {
+	o.hooks.Add(1)
+	defer o.hooks.Done()
+	if o.shutdown == nil {
+		return o.hook.Run(ctx, inv)
+	}
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-o.shutdown:
+			cancel()
+		case <-hctx.Done():
+		}
+	}()
+	return o.hook.Run(hctx, inv)
+}
+
+// WaitHooks blocks until no hook run is in flight, or until ctx is done. It is
+// the other half of the shutdown above: cancelling a hook's context is what
+// triggers the group kill, so a marquee that closed its shutdown channel and
+// exited immediately could still leave the script alive. Waiting for the run to
+// return means waiting for the kill to have happened.
+func (o *Orchestrator) WaitHooks(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		o.hooks.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // setPhase records a phase transition (with its timestamp, for timing) and

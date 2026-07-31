@@ -246,6 +246,13 @@ func run() int {
 	// handling it." The HTTP switch endpoint and the proxy's interstitial are
 	// wired only when a token was minted; without one, no switch ever runs and
 	// the orchestrator simply forwards a dying child outward as before.
+	//
+	// shutdown is closed on every path out of run, so a switch that is bootstrapping
+	// a worktree when marquee goes away has its hook cancelled — and its process
+	// group killed — instead of being left running detached. The switch's own
+	// context cannot carry that: it is deliberately a background one so a client
+	// disconnect never strands the child mid-switch.
+	shutdown := make(chan struct{})
 	healthAddr := fmt.Sprintf("127.0.0.1:%d", internalPort)
 	orch := switcher.NewOrchestrator(switcher.OrchestratorConfig{
 		Child:          child,
@@ -255,10 +262,21 @@ func run() int {
 		Slug:           launchSlug,
 		Hook:           switchHook,
 		ReadyCmd:       opts.readyCmd,
+		Shutdown:       shutdown,
 		WorktreeFilter: opts.worktreeFilter,
 		HealthTimeout:  opts.healthTimeout,
 		RestartTimeout: opts.restartTimeout,
 	})
+	// Deferred rather than repeated in each exit branch: every way out of run is a
+	// way out of marquee, and one that skipped this would be the one that orphans a
+	// hook. Waiting for the run to return is what makes the kill actually land
+	// before the process goes.
+	defer func() {
+		close(shutdown)
+		ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+		defer cancel()
+		orch.WaitHooks(ctx)
+	}()
 	if switchToken != "" {
 		sw := switcher.New(switcher.Config{Token: switchToken, Orchestrator: orch})
 		switcher.Register(handler.Internal(), sw)

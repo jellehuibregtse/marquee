@@ -182,7 +182,7 @@ A failing hook (a non-zero exit, or either of those kills) never leaves you with
 
 The hook's output is streamed as it runs, which `--quiet` suppresses along with marquee's other progress lines. The last lines of a *failing* hook are printed again as an error, so `--quiet` never hides why a bootstrap failed.
 
-While the hook runs at startup, marquee is already serving: a browser that arrives mid-bootstrap gets the same self-refreshing "app is starting" page it gets while your dev server boots. Ctrl-C during a bootstrap stops the hook and its child processes.
+While the hook runs at startup, marquee is already serving: a browser that arrives mid-bootstrap gets the same self-refreshing "app is starting" page it gets while your dev server boots. Ctrl-C stops the hook and its child processes, whether it is bootstrapping at startup or in the middle of a switch.
 
 ### Switching worktrees
 

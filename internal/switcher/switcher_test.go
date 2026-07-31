@@ -180,6 +180,7 @@ type harnessOpts struct {
 	healthTimeout time.Duration
 	dir           string
 	globs         []string
+	shutdown      <-chan struct{}
 }
 
 func newHarness(t *testing.T, opts harnessOpts) *harness {
@@ -209,6 +210,7 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 		Hook:           hook.New(hook.Config{Command: opts.switchHook}),
 		ReadyCmd:       opts.readyCmd,
 		HealthTimeout:  opts.healthTimeout,
+		Shutdown:       opts.shutdown,
 		WorktreeFilter: filter,
 	})
 	token := opts.token
@@ -901,25 +903,94 @@ func TestReadyCmdHangKillsItsProcessGroup(t *testing.T) {
 		t.Fatalf("status = %d, want 502; body %s", rec.Code, rec.Body.String())
 	}
 
-	raw, err := os.ReadFile(pidPath)
+	assertGone(t, pidPath, "the ready-cmd's grandchild survived its timeout: the process group was not killed")
+}
+
+// waitForFile blocks until path exists, so a test can wait for an operator script
+// to have really started rather than guessing at a sleep.
+func waitForFile(t *testing.T, path, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s (%s never appeared)", msg, path)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// assertGone fails unless the pid recorded in pidPath — a background process an
+// operator script left behind — is gone, which is what proves the kill took the
+// whole process group and not just the shell. Signal 0 only checks whether the pid
+// is still around; the process is not our child, so once the group kill lands it is
+// reparented and reaped and the signal fails.
+func assertGone(t *testing.T, pidPath, msg string) {
+	t.Helper()
+	raw, err := os.ReadFile(pidPath) // #nosec G304 -- test-owned temp path
 	if err != nil {
-		t.Fatalf("ready-cmd recorded no grandchild pid: %v", err)
+		t.Fatalf("the script recorded no grandchild pid: %v", err)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil {
 		t.Fatalf("grandchild pid %q: %v", raw, err)
 	}
-	// Signal 0 only checks whether the pid is still around. The grandchild is not
-	// our child, so once the group kill lands it is reparented and reaped and the
-	// signal fails.
 	deadline := time.Now().Add(3 * time.Second)
 	for syscall.Kill(pid, 0) == nil {
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatalf("grandchild pid %d survived the ready-cmd timeout: the process group was not killed", pid)
+			t.Fatalf("%s (pid %d)", msg, pid)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// Ctrl-C in the middle of a switch has to take the hook down with it. Only the
+// startup leg used to do that, so interrupting a switch left the bootstrap script
+// running detached — twice observed as a pair of orphaned "bundle install" runs
+// with no marquee alive, competing with the dev server the user then started by
+// hand. The hook below records a background grandchild and then hangs; closing
+// shutdown must fail the switch and leave neither process behind. Its own bounds
+// cannot be what ends it: the hook is silent for far less than its idle timeout
+// and nowhere near the ceiling.
+func TestShutdownCancelsAnInFlightSwitchHook(t *testing.T) {
+	shutdown := make(chan struct{})
+	pidPath := filepath.Join(t.TempDir(), "grandchild.pid")
+	h, _, feature := newReadyHarness(t, harnessOpts{
+		health:     func(context.Context) error { return nil },
+		switchHook: `sleep 60 & echo $! > ` + pidPath + `; touch bootstrapping; sleep 60`,
+		shutdown:   shutdown,
+	})
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- h.post(`{"slug":"feature"}`, sameOriginToken) }()
+
+	// The hook writes this marker in the target worktree, so waiting for it is
+	// waiting for the hook to really be running.
+	waitForFile(t, filepath.Join(feature, "bootstrapping"), "the switch hook never started")
+	close(shutdown)
+
+	select {
+	case rec := <-done:
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502; body %s", rec.Code, rec.Body.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the switch hook outlived the shutdown: it was left running detached")
+	}
+	if n := h.child.count(); n != 0 {
+		t.Errorf("child restarted %d times, want 0 (the hook was cancelled before any process action)", n)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	h.orch.WaitHooks(ctx)
+	if ctx.Err() != nil {
+		t.Error("WaitHooks did not report the cancelled hook as finished, so shutdown would race the kill")
+	}
+	assertGone(t, pidPath, "the hook's grandchild survived the shutdown: the process group was not killed")
 }
 
 // The child-liveness assertion runs AFTER the readiness gate, so a child that

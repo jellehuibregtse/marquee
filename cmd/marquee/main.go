@@ -307,7 +307,7 @@ func run() int {
 		}
 	}
 
-	if !opts.noOpen {
+	if opts.open {
 		go openWhenHealthy(child, fmt.Sprintf("127.0.0.1:%d", internalPort), browserURL(opts.listen), log)
 	}
 

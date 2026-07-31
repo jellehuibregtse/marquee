@@ -29,7 +29,7 @@ func TestParseArgsDefaults(t *testing.T) {
 	if opts.theme != "default" {
 		t.Errorf("theme = %q, want default", opts.theme)
 	}
-	if opts.noOpen || opts.quiet || opts.unsafeListen {
+	if opts.open || opts.quiet || opts.unsafeListen {
 		t.Errorf("bool flags default true: %+v", opts)
 	}
 	if len(opts.allowHosts) != 0 {
@@ -54,12 +54,12 @@ func TestParseArgsAllowHostRepeatable(t *testing.T) {
 
 func TestParseArgsFlagsCaptured(t *testing.T) {
 	opts, err := parseArgs("marquee",
-		[]string{"--position", "top-left", "--quiet", "--no-open", "--unsafe-listen",
+		[]string{"--position", "top-left", "--quiet", "--open", "--unsafe-listen",
 			"--listen", "0.0.0.0:3000", "--", "bin/dev", "arg"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
 	}
-	if opts.position != "top-left" || !opts.quiet || !opts.noOpen || !opts.unsafeListen {
+	if opts.position != "top-left" || !opts.quiet || !opts.open || !opts.unsafeListen {
 		t.Errorf("flags not captured: %+v", opts)
 	}
 	if opts.listen != "0.0.0.0:3000" {
@@ -67,6 +67,22 @@ func TestParseArgsFlagsCaptured(t *testing.T) {
 	}
 	if len(opts.command) != 2 || opts.command[0] != "bin/dev" || opts.command[1] != "arg" {
 		t.Errorf("command = %v, want [bin/dev arg]", opts.command)
+	}
+}
+
+// Opening a browser is opt-in, and the flag that used to ask for the current
+// default is gone rather than kept as a no-op, so an invocation carrying it fails
+// instead of quietly meaning something else.
+func TestParseArgsDoesNotOpenTheBrowserByDefault(t *testing.T) {
+	opts, err := parseArgs("marquee", []string{"--", "bin/dev"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if opts.open {
+		t.Error("open is set without --open")
+	}
+	if _, err := parseArgs("marquee", []string{"--no-open", "--", "bin/dev"}, io.Discard); err == nil {
+		t.Error("parseArgs accepted --no-open")
 	}
 }
 

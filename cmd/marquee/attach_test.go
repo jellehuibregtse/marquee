@@ -52,7 +52,7 @@ func TestParseAttachArgsDefaults(t *testing.T) {
 func TestParseAttachArgsFlagsCaptured(t *testing.T) {
 	opts, err := parseAttachArgs("marquee attach", []string{
 		"--upstream", "http://127.0.0.1:9999", "--listen", "localhost:4000",
-		"--position", "top-right", "--quiet", "--no-open", "--unsafe-listen",
+		"--position", "top-right", "--quiet", "--open", "--unsafe-listen",
 		"--allow-host", "a.test", "--allow-host", "b.test",
 	}, io.Discard)
 	if err != nil {
@@ -61,7 +61,7 @@ func TestParseAttachArgsFlagsCaptured(t *testing.T) {
 	if opts.listen != "localhost:4000" || opts.position != "top-right" {
 		t.Errorf("flags not captured: %+v", opts)
 	}
-	if !opts.quiet || !opts.noOpen || !opts.unsafeListen {
+	if !opts.quiet || !opts.open || !opts.unsafeListen {
 		t.Errorf("bool flags not captured: %+v", opts)
 	}
 	if strings.Join(opts.allowHosts, ",") != "a.test,b.test" {

@@ -177,7 +177,6 @@ func startMarqueeWith(repo string, flags []string, childArgv []string) (*marquee
 	args := []string{
 		"--listen", addr,
 		"--internal-port", strconv.Itoa(internalPort),
-		"--no-open",
 	}
 	args = append(args, flags...)
 	args = append(args, "--")

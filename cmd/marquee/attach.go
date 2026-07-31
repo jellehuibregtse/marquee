@@ -85,7 +85,7 @@ func runAttach(args []string) int {
 
 	log.Info("listening on http://%s, upstream %s", ln.Addr(), opts.upstreamURL.Redacted())
 
-	if !opts.noOpen {
+	if opts.open {
 		go openUpstreamWhenHealthy(upstreamDialAddr(opts.upstreamURL), browserURL(opts.listen), log)
 	}
 

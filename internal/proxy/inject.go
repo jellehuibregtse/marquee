@@ -3,13 +3,11 @@ package proxy
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 // barScriptTag loads the bar module; the /__marquee/bar.js path is the
@@ -45,17 +43,14 @@ const injectSizeCap = 10 << 20
 // client, and errors are logged once per distinct message (the gitinfo
 // discipline), never surfaced as a proxy error.
 type injector struct {
-	logger   *log.Logger
+	once     *onceLogger
 	switches *barSwitches
 	relaxCSP bool
 	snippet  string
-
-	mu      sync.Mutex
-	lastMsg string
 }
 
 func newInjector(logger *log.Logger, switches *barSwitches, relaxCSP bool, token string) *injector {
-	return &injector{logger: logger, switches: switches, relaxCSP: relaxCSP, snippet: barSnippetForToken(token)}
+	return &injector{once: newOnceLogger(logger), switches: switches, relaxCSP: relaxCSP, snippet: barSnippetForToken(token)}
 }
 
 // modifyResponse is the ReverseProxy.ModifyResponse hook. It always returns
@@ -147,13 +142,13 @@ func (in *injector) inject(resp *http.Response) {
 		if err, ok := r.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 			panic(r)
 		}
-		in.logOnce("inject: recovered panic, passing original response through: %v", r)
+		in.once.log("inject: recovered panic, passing original response through: %v", r)
 		restore()
 	}()
 
 	buf, complete, readErr = readCapped(upstream, injectSizeCap)
 	if readErr != nil {
-		in.logOnce("inject: reading upstream body, passing original bytes through: %v", readErr)
+		in.once.log("inject: reading upstream body, passing original bytes through: %v", readErr)
 		restore()
 		return
 	}
@@ -276,17 +271,6 @@ func indexFold(b []byte, sub string) int {
 		}
 	}
 	return -1
-}
-
-func (in *injector) logOnce(format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	if msg == in.lastMsg {
-		return
-	}
-	in.lastMsg = msg
-	in.logger.Printf("marquee: %s", msg)
 }
 
 type readCloser struct {

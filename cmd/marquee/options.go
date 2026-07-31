@@ -68,7 +68,7 @@ func parsePills(raw string) ([]string, error) {
 // checkTimeout rejects a non-positive switch timeout. Zero and negative are
 // both refused rather than read as "no limit": the orchestrator falls back to
 // its built-in default for any non-positive value, so an operator who writes
-// --hook-timeout 0 hoping to lift the ceiling would silently get 5m, and a
+// --hook-timeout 0 hoping to lift the ceiling would silently get the built-in one, and a
 // negative one would abort the hook the instant it starts.
 func checkTimeout(name string, d time.Duration) error {
 	if d <= 0 {
@@ -136,7 +136,7 @@ func newRunFlagSet(name string, out io.Writer) (*flag.FlagSet, *options) {
 	fs.StringVar(&opts.switchHook, "switch-hook", "", "command run in a worktree before the child starts there, including at startup in the worktree marquee is launched in (e.g. \"bundle install\"); defaults to .marquee/hook when that is executable, and an empty value disables it")
 	fs.Var((*stringList)(&opts.worktreeGlobs), "worktree-glob", "glob matched against a worktree's absolute path; when given, only matching worktrees (plus the main one) are switch targets (repeatable)")
 	fs.StringVar(&opts.readyCmd, "ready-cmd", "", "command retried in the target worktree after the child's port answers, until it exits 0 or --health-timeout expires (e.g. \"curl -sf localhost:3036\"); empty disables it")
-	fs.DurationVar(&opts.hookTimeout, "hook-timeout", hook.DefaultTimeout, "how long --switch-hook may run on any leg before its process group is killed, e.g. 20m")
+	fs.DurationVar(&opts.hookTimeout, "hook-timeout", hook.DefaultTimeout, "absolute ceiling on one --switch-hook run before its process group is killed; a hook that goes quiet is killed long before this, e.g. 90m")
 	fs.DurationVar(&opts.healthTimeout, "health-timeout", switcher.DefaultHealthTimeout, "how long to wait for a restarted child to become healthy before the switch reverts, e.g. 90s")
 	fs.DurationVar(&opts.restartTimeout, "restart-timeout", switcher.DefaultRestartTimeout, "how long a single stop-and-spawn of the child may take, e.g. 60s")
 	fs.BoolVar(&opts.showVersion, "version", false, "print version and exit")

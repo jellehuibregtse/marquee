@@ -85,10 +85,10 @@ func TestUnconfiguredHookIsANoOp(t *testing.T) {
 }
 
 // A hanging hook must not hang marquee, and it must not leak the children it
-// spawned: the hook leads its own process group and the whole group is killed on
-// timeout. The grandchild writes a marker after its parent's deadline, so a
-// surviving group would leave it behind.
-func TestTimeoutKillsTheWholeHookProcessGroup(t *testing.T) {
+// spawned: the hook leads its own process group and the whole group is killed
+// when the ceiling runs out. The grandchild writes a marker after its parent's
+// deadline, so a surviving group would leave it behind.
+func TestTheCeilingKillsTheWholeHookProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "grandchild-survived")
 	r := hook.New(hook.Config{Command: "sh -c 'sleep 5; touch " + marker + "' & wait", Timeout: 200 * time.Millisecond})
@@ -105,6 +105,95 @@ func TestTimeoutKillsTheWholeHookProcessGroup(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("the hook's grandchild outlived the timeout: the process group was not killed")
+	}
+}
+
+// A hook that has gone quiet is treated as hung: the idle timeout kills it well
+// inside the ceiling and takes the whole process group with it, so nothing it
+// spawned is left behind. The failure has to say silence killed it, because that
+// points at the step the hook was stuck on, and it still has to carry the hook's
+// own last words.
+//
+// The durations here are scaled down; the real idle timeout is DefaultIdleTimeout.
+func TestSilenceKillsTheHookAndItsProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "grandchild-survived")
+	var failure recorder
+	r := hook.New(hook.Config{
+		Command:     "echo installing; sh -c 'sleep 5; touch " + marker + "' & wait",
+		IdleTimeout: 300 * time.Millisecond,
+		Timeout:     30 * time.Second,
+		Errf:        failure.logf,
+	})
+
+	start := time.Now()
+	err := r.Run(context.Background(), in(dir))
+	if err == nil {
+		t.Fatal("Run returned nil for a hook that went silent past its idle timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("Run took %s, want the idle timeout to cut it short", elapsed)
+	}
+	if !strings.Contains(err.Error(), "produced no output for 300ms") {
+		t.Errorf("error = %q, want it to name the silence that killed the hook", err)
+	}
+	if got := failure.joined(); !strings.Contains(got, "installing") {
+		t.Errorf("error sink saw %q, want the tail of the killed hook's output", got)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the hook's grandchild outlived the idle timeout: the process group was not killed")
+	}
+}
+
+// The ceiling is the other bound, and the only one a hook that keeps talking can
+// ever hit. Its message must not blame silence, since nothing was silent.
+func TestTheCeilingKillsAHookThatNeverStopsTalking(t *testing.T) {
+	var failure recorder
+	r := hook.New(hook.Config{
+		Command:     "while :; do echo still going; sleep 0.05; done",
+		IdleTimeout: 10 * time.Second,
+		Timeout:     400 * time.Millisecond,
+		Errf:        failure.logf,
+	})
+
+	start := time.Now()
+	err := r.Run(context.Background(), in(t.TempDir()))
+	if err == nil {
+		t.Fatal("Run returned nil for a hook that outran its ceiling")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("Run took %s, want the ceiling to cut it short", elapsed)
+	}
+	if !strings.Contains(err.Error(), "exceeded its 400ms limit") {
+		t.Errorf("error = %q, want it to name the ceiling rather than silence", err)
+	}
+	if strings.Contains(err.Error(), "produced no output") {
+		t.Errorf("error = %q blames silence for a hook that never stopped printing", err)
+	}
+	if got := failure.joined(); !strings.Contains(got, "still going") {
+		t.Errorf("error sink saw %q, want the tail of the killed hook's output", got)
+	}
+}
+
+// The defect the idle timeout replaced: a hook doing real work was killed at a
+// fixed total budget, mid-build, for being slow. Output is what proves a hook
+// alive, so one that keeps printing runs to completion however long it takes —
+// here several times over its own idle timeout.
+func TestAHookThatKeepsPrintingIsNotKilled(t *testing.T) {
+	dir := t.TempDir()
+	r := hook.New(hook.Config{
+		Command:     "for i in $(seq 1 12); do echo step-$i; sleep 0.1; done; echo done > finished",
+		IdleTimeout: 300 * time.Millisecond,
+		Timeout:     30 * time.Second,
+	})
+
+	if err := r.Run(context.Background(), in(dir)); err != nil {
+		t.Fatalf("a hook that kept printing was killed anyway: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "finished")); err != nil {
+		t.Fatalf("the hook did not run to completion: %v", err)
 	}
 }
 

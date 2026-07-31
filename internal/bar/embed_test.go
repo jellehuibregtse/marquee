@@ -141,6 +141,12 @@ func TestBarScriptEmbedded(t *testing.T) {
 		`"ArrowUp"`,
 		"#menuSearch.focus()",
 		"items[0].click()",
+		// Recency ordering (worktree-recency): the menu ranks nothing itself. The
+		// status payload arrives ordered by branch recency and the only sort in
+		// #buildMenu is gated on a non-empty search query, so an unsearched menu
+		// renders the server's order as given.
+		`if (query !== "") entries.sort(`,
+		"keeps payload order",
 		// PR-chip layout shift (PR 1): the slot reserves a fixed width and
 		// renders a reduced-motion-aware shimmer skeleton while the PR is still
 		// unknown, so the switcher/toggle don't shift when the async poll

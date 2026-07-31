@@ -1013,9 +1013,10 @@ class MarqueeBar extends HTMLElement {
   }
 
   // #buildMenu renders the worktree list into the menu, filtered and ranked by
-  // the search query when one is set. An empty query keeps git order; a
-  // non-empty query keeps only fuzzy matches, best score first (the stable
-  // sort preserves git order between equal scores).
+  // the search query when one is set. An empty query keeps payload order, which
+  // is the server's recency ranking (main first, then most recently committed
+  // branch); a non-empty query keeps only fuzzy matches, best score first (the
+  // stable sort preserves payload order between equal scores).
   #buildMenu(worktrees, current) {
     const currentSlug = current && current.slug ? current.slug : "";
     const query = this.#searchQuery.trim();

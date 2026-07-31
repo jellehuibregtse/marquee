@@ -196,6 +196,8 @@ marquee --ready-cmd "curl -sf localhost:3036 && curl -sf localhost:7433/health" 
 
 The early attempts are expected to fail while things come up, so its output is not streamed; you see it only if the check never passes. `--health-timeout` applies to the port wait and to the readiness command separately, so a slow but successful port wait can't leave the readiness check no time to pass. The revert after a failed switch is not gated on `--ready-cmd`, since that leg only has to get your dev server back up. `--restart-timeout` bounds one stop-and-spawn of the child, which is the step before either check.
 
+The picker lists the main worktree first, then every other worktree by branch recency, most recently committed at the top. With dozens of worktrees that puts the two or three you are working in at the top of the menu, and the search box finds any of the rest. A worktree with a detached HEAD has no branch to date it, so it sorts last.
+
 `--worktree-glob` decides which worktrees are offered at all, matched against the worktree's absolute path:
 
 ```sh

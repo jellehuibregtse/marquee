@@ -19,6 +19,19 @@ func gitCmd(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// gitCmdAt runs git with a fixed committer date, so a fixture can order branches
+// by recency without depending on elapsed time — git records committerdate at
+// whole-second resolution, which commits made in one test run would share.
+func gitCmdAt(t *testing.T, dir, date string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_COMMITTER_DATE="+date, "GIT_AUTHOR_DATE="+date)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
 func tempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
@@ -154,6 +167,88 @@ func TestCollectWorktrees(t *testing.T) {
 	if fromLinked.RepoRoot != wtPath {
 		t.Errorf("RepoRoot = %q, want %q", fromLinked.RepoRoot, wtPath)
 	}
+}
+
+func commitAt(t *testing.T, dir, date, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmdAt(t, dir, date, "commit", "-am", "Update notes")
+}
+
+func assertSlugs(t *testing.T, worktrees []Worktree, want ...string) {
+	t.Helper()
+	got := make([]string, 0, len(worktrees))
+	for _, wt := range worktrees {
+		got = append(got, wt.Slug)
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("worktree order = %v, want %v", got, want)
+	}
+}
+
+func TestCollectOrdersWorktreesByBranchRecency(t *testing.T) {
+	dir := tempDir(t)
+	initRepo(t, dir)
+	base := tempDir(t)
+	addWorktree := func(slug string, flags ...string) string {
+		path := filepath.Join(base, slug)
+		gitCmd(t, dir, append(append([]string{"worktree", "add"}, flags...), path)...)
+		return path
+	}
+	// The add order is deliberately not the recency order, and the detached tree
+	// sits in the middle of it, so passing means the ordering ran rather than
+	// git's own list order happening to match.
+	beacon := addWorktree("beacon", "-b", "beacon")
+	addWorktree("adrift", "--detach")
+	sundial := addWorktree("sundial", "-b", "sundial")
+	lantern := addWorktree("lantern", "-b", "lantern")
+
+	commitAt(t, beacon, "2026-02-01T09:00:00+01:00", "beacon\n")
+	commitAt(t, sundial, "2026-03-01T09:00:00+01:00", "sundial\n")
+	commitAt(t, lantern, "2026-04-01T09:00:00+01:00", "lantern\n")
+	// trunk is the least recently committed branch, so it only stays first if the
+	// main worktree is pinned there.
+	commitAt(t, dir, "2026-01-01T09:00:00+01:00", "trunk\n")
+
+	snap, err := collect(dir)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	assertSlugs(t, snap.Worktrees, filepath.Base(dir), "lantern", "sundial", "beacon", "adrift")
+	if !snap.Worktree.IsMain {
+		t.Error("IsMain = false in the main worktree after reordering, want true")
+	}
+}
+
+func TestOrderByRecencyPinsMainAndSinksUndatedBranches(t *testing.T) {
+	worktrees := []Worktree{
+		{Slug: "harbour", Branch: "trunk"},
+		{Slug: "adrift"},
+		{Slug: "beacon", Branch: "beacon"},
+		{Slug: "kiln", Branch: "kiln"},
+		{Slug: "lantern", Branch: "lantern"},
+		{Slug: "cinder"},
+	}
+	// kiln has a branch but no entry, which is what a branch with no commits
+	// looks like to for-each-ref; adrift and cinder are detached heads.
+	refs := "lantern\nbeacon\ntrunk\n"
+
+	assertSlugs(t, orderByRecency(worktrees, refs), "harbour", "lantern", "beacon", "adrift", "kiln", "cinder")
+	assertSlugs(t, worktrees, "harbour", "adrift", "beacon", "kiln", "lantern", "cinder")
+}
+
+func TestOrderByRecencyWithoutDatedBranchesKeepsGitOrder(t *testing.T) {
+	worktrees := []Worktree{
+		{Slug: "harbour", Branch: "trunk"},
+		{Slug: "beacon", Branch: "beacon"},
+		{Slug: "adrift"},
+	}
+
+	assertSlugs(t, orderByRecency(worktrees, ""), "harbour", "beacon", "adrift")
+	assertSlugs(t, orderByRecency(nil, ""))
+	assertSlugs(t, orderByRecency([]Worktree{{Slug: "harbour"}}, "\n\n"), "harbour")
 }
 
 func TestNonGitDirServesZeroStateAndLogsOnce(t *testing.T) {

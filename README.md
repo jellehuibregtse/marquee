@@ -24,11 +24,11 @@ The binary makes no network calls except to the upstream and (optionally, operat
 
 ## What it does
 
-- **Zero config.** `marquee -- bin/dev` and the port your browser already uses keeps working. marquee picks a free internal port, points your dev command's `PORT` at it, and serves your usual `:3000` itself.
+- **Zero config.** `marquee -- bin/dev` and the port your browser already uses keeps working. marquee picks a free internal port, points your dev command's `PORT` at it, and serves your usual `:3000` itself. What it cannot infer, like the extra hostnames your app is reached by, goes in an optional [`.marquee/config`](#marqueeconfig-so-you-dont-pass-flags) so the command stays `marquee -- bin/dev`.
 - **Injects a status bar into every HTML page** — a colored branch chip (color derived from the branch name), a dirty-state indicator, the worktree slug when you are not on the main worktree, and a link to the open PR when `gh` finds one.
 - **Fully transparent.** Your app never knows marquee is there. The `Host` header is preserved (multi-tenant subdomain routing keeps working), WebSockets and Server-Sent Events pass through untouched, and any injection error falls open to the original bytes.
 - **The bar lives in a shadow DOM** — your app's CSS can't restyle it and it can't leak into your app. Accessible by design: a `role="status"` landmark, real keyboard-operable buttons, and text that clears 4.5:1 contrast in both light and dark themes.
-- **No dependencies.** A single Go binary. No config file, no browser extension, no separate frontend.
+- **No dependencies.** A single Go binary. No browser extension, no separate frontend, nothing to run alongside it.
 
 ## Install
 
@@ -62,6 +62,8 @@ marquee -- bin/dev
 
 Everything after `--` is your command, run verbatim.
 
+Flags a repo always needs belong in [`.marquee/config`](#marqueeconfig-so-you-dont-pass-flags) rather than in your muscle memory.
+
 ### Flags
 
 | Flag | Default | What it does |
@@ -86,6 +88,33 @@ Everything after `--` is your command, run verbatim.
 ### Customizing the bar
 
 `--position`, `--size`, `--theme`, and `--pills` set the starting defaults. You can also change all four live from the **⚙ settings panel** in the bar itself — click the gear, pick a corner/size/theme, or toggle and reorder pills. Panel choices are saved in the browser per app and win over the flags on the next load; **Reset** returns everything to the flag defaults.
+
+### `.marquee/config`, so you don't pass flags
+
+Anything in the flag table above can live in `.marquee/config` in the directory you launch marquee in, and then the invocation is just `marquee -- bin/dev` again:
+
+```
+# .marquee/config
+--allow-host '*.example.test'   # our dev app is reached by subdomain
+--position top-right
+```
+
+The file holds **the flags you would have typed**: one per line, `#` starts a comment, blank lines are ignored, and quoting works the way a shell's does, so a value with a space or a `*` in it needs no escaping. There is no second set of key names to learn and nothing that can drift from the flags themselves.
+
+Precedence follows from that. The file's flags are parsed as if they came first on the command line, so:
+
+- **the command line wins** for a flag that holds one value: `--position bottom-left` on the command line beats `--position top-right` in the file;
+- **repeatable flags add up**: `--allow-host` and `--worktree-glob` given on the command line extend what the file listed rather than replacing it, because "also allow this host" is the only thing that flag has ever meant;
+- **an invalid flag in the file fails the run**, with the same message the same word would produce on the command line.
+
+Two things the file deliberately cannot do:
+
+- **It cannot choose what marquee runs.** `--` and the command after it come from the command line only. A `--`, or any bare word, in the file is an error rather than a command, so a config file can never turn into a process. It also means the file is safe to commit, and `marquee -- bin/dev` still says on screen what is about to run.
+- **It cannot be per worktree.** Like the hook, the file is read once from the launch checkout, so switching worktrees never changes the flags underneath a running marquee.
+
+A missing file is the normal case and says nothing. A file that exists but cannot be read, or that marquee cannot parse, fails the run and names the line: it was written to change how marquee behaves, so starting with none of it applied is the one outcome to avoid.
+
+Attach mode does not read it. Its flag set is a different one, and a file written for `marquee -- bin/dev` would fail `marquee attach` over flags attach does not have.
 
 ### Bootstrapping a worktree (`--switch-hook`)
 
@@ -275,5 +304,5 @@ marquee is a local dev tool, not infrastructure. It is deliberately **not**:
 
 - a process-manager replacement (overmind/foreman keep their jobs; marquee wraps them);
 - a tunneling or HTTPS/TLS tool (plain HTTP on localhost only);
-- configurable via a config file (flags and env vars only);
+- extensively configurable: flags are the whole interface, and the optional `.marquee/config` is those same flags kept in a file rather than a settings schema of its own;
 - production-safe — it refuses to start unless the upstream looks local, and never will be.

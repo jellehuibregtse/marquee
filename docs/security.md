@@ -258,6 +258,30 @@ this surface: it runs before the listener serves a single request, with the `cwd
 taken from `os.Getwd`. See the "Worktree switch endpoint" section for where the
 hook sits in the guard/switch sequence.
 
+**The conventional `.marquee/config` cannot reach process spawning at all.** The
+optional flag file (`.marquee/config` in the launch directory, holding the flags an
+operator would otherwise type) is parsed into words that are prepended to the real
+command line before `flag.Parse`, which puts it on the operator side of the
+boundary by construction: it is read once at startup from `os.Getwd`, never from a
+worktree a switch moves into, and never from the HTTP request. What it must not be
+able to do is choose the process marquee spawns, since that would turn a file in a
+checkout into arbitrary execution, so that is refused twice over:
+
+- **Shape check before parsing.** Every line has to be one flag: a bare `--`
+  anywhere, a first word that is not a flag, or more than a flag and its value is a
+  hard error that fails the run. `--` and the command after it therefore come from
+  the command line only.
+- **Invariant check after parsing.** Whatever flag parsing left over as the command
+  must be a tail of the real command-line arguments. A word from the file that
+  ended flag parsing early (`--quiet true`, which passes the shape check) would push
+  itself into the command and is caught here, so the guarantee does not rest on the
+  shape rules being exhaustive.
+
+Everything else the file can set is a flag the operator could have typed, validated
+by the same code, including `--switch-hook`, which is why the file being readable is
+treated as operator intent and an unreadable or unparseable file fails the run
+instead of being skipped.
+
 **The conventional `.marquee/hook` does not widen it either.** With no
 `--switch-hook`, marquee runs an executable `.marquee/hook` found in the directory
 it was launched in as the hook command. That keeps the value on the operator side
@@ -330,7 +354,14 @@ hardened against corrupt input: see Threat 7's pidfile note.
   symlink to a directory, a dangling symlink, or non-executable yields no command
   at all, and the accepted path is quoted as one shell word) with
   `TestConventionalHookDirectoryIsRefused` in `e2e/hook_test.go` (the real binary
-  over a directory-shaped hook: it warns, spawns nothing, and still starts).
+  over a directory-shaped hook: it warns, spawns nothing, and still starts);
+  `TestLoadConfigArgsRefusesToSetTheCommand` and
+  `TestParseArgsWithConfigRefusesAConfigWordInTheCommand` in
+  `cmd/marquee/config_test.go` (every shape by which `.marquee/config` could put a
+  word into the command is refused, at the shape check and at the invariant behind
+  it) with `TestConfigFileCannotSetTheCommand` in `e2e/config_test.go` (the real
+  binary refuses to boot over such a file, runs nothing, and leaves the internal
+  port empty).
 
 ## Threat 5 — Malicious / compromised upstream responses
 

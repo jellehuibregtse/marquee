@@ -3,7 +3,6 @@ package e2e
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -271,21 +270,18 @@ func makeSwitchRepo(main, feature, featureBranch string) error {
 	if err := os.WriteFile(filepath.Join(main, "app.txt"), []byte("main\n"), 0o644); err != nil {
 		return err
 	}
+	if err := assertNoRepository(main); err != nil {
+		return err
+	}
 	steps := [][]string{
 		{"init", "-q", "-b", "marquee-e2e-main"},
-		{"config", "user.email", "e2e@example.com"},
-		{"config", "user.name", "e2e"},
-		{"config", "commit.gpgsign", "false"},
 		{"add", "."},
 		{"commit", "-q", "-m", "fixture"},
 		{"worktree", "add", "-q", "-b", featureBranch, feature},
 	}
 	for _, args := range steps {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = main
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, out)
+		if err := runFixtureGit(main, args...); err != nil {
+			return err
 		}
 	}
 	return nil

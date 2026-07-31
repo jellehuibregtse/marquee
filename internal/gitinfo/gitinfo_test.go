@@ -10,10 +10,22 @@ import (
 	"time"
 )
 
+// fixtureIdentity is the author and committer of every fixture commit. It rides
+// in the environment because a `git config` write lands in whatever repository
+// the directory turns out to belong to, and one that resolved somewhere real
+// once renamed this repository's own author for eleven commits.
+var fixtureIdentity = []string{
+	"GIT_AUTHOR_NAME=Fixture Author",
+	"GIT_AUTHOR_EMAIL=fixture@example.com",
+	"GIT_COMMITTER_NAME=Fixture Author",
+	"GIT_COMMITTER_EMAIL=fixture@example.com",
+}
+
 func gitCmd(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false"}, args...)...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), fixtureIdentity...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -24,9 +36,10 @@ func gitCmd(t *testing.T, dir string, args ...string) {
 // whole-second resolution, which commits made in one test run would share.
 func gitCmdAt(t *testing.T, dir, date string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false"}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_COMMITTER_DATE="+date, "GIT_AUTHOR_DATE="+date)
+	cmd.Env = append(os.Environ(), fixtureIdentity...)
+	cmd.Env = append(cmd.Env, "GIT_COMMITTER_DATE="+date, "GIT_AUTHOR_DATE="+date)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -44,9 +57,6 @@ func tempDir(t *testing.T) string {
 func initRepo(t *testing.T, dir string) {
 	t.Helper()
 	gitCmd(t, dir, "init", "-b", "trunk")
-	gitCmd(t, dir, "config", "user.name", "Fixture Author")
-	gitCmd(t, dir, "config", "user.email", "fixture@example.com")
-	gitCmd(t, dir, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("first\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

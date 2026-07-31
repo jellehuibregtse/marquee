@@ -23,10 +23,22 @@ import (
 	"github.com/jellehuibregtse/marquee/internal/status"
 )
 
+// fixtureIdentity is the author and committer of every fixture commit. It rides
+// in the environment because a `git config` write lands in whatever repository
+// the directory turns out to belong to, and one that resolved somewhere real
+// once renamed this repository's own author for eleven commits.
+var fixtureIdentity = []string{
+	"GIT_AUTHOR_NAME=Fixture Author",
+	"GIT_AUTHOR_EMAIL=fixture@example.com",
+	"GIT_COMMITTER_NAME=Fixture Author",
+	"GIT_COMMITTER_EMAIL=fixture@example.com",
+}
+
 func gitCmd(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false"}, args...)...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), fixtureIdentity...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -39,9 +51,6 @@ func fixtureRepo(t *testing.T) string {
 		t.Fatal(err)
 	}
 	gitCmd(t, dir, "init", "-b", "trunk")
-	gitCmd(t, dir, "config", "user.name", "Fixture Author")
-	gitCmd(t, dir, "config", "user.email", "fixture@example.com")
-	gitCmd(t, dir, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("first\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

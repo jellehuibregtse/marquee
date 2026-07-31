@@ -312,3 +312,29 @@ func TestPollerServesStaleOnFailure(t *testing.T) {
 		t.Errorf("logged %d times for a persistent failure, want 1", got)
 	}
 }
+
+func TestRunGitDeclinesOptionalLocks(t *testing.T) {
+	dir := tempDir(t)
+	bin := tempDir(t)
+	argsFile := filepath.Join(dir, "args")
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+
+	if _, err := runGit(dir, "status", "--porcelain"); err != nil {
+		t.Fatalf("runGit: %v", err)
+	}
+
+	recorded, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The flag is a top-level git option, so it is only honored ahead of the
+	// subcommand.
+	want := "--no-optional-locks\nstatus\n--porcelain\n"
+	if string(recorded) != want {
+		t.Errorf("git got args %q, want %q", recorded, want)
+	}
+}

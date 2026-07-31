@@ -308,3 +308,70 @@ func pidfileFor(t *testing.T, listen string) string {
 	sum := sha256.Sum256([]byte(listen))
 	return filepath.Join(cache, "marquee", hex.EncodeToString(sum[:8])+".pid")
 }
+
+// The conventional hook needs no flag: an executable .marquee/hook in the launch
+// checkout is the switch hook, symlinked at the script the repo already keeps
+// (which is how it is meant to be adopted). The child is gated on the file the
+// hook creates, so the app can only come up if the hook ran first — and it creates
+// it by a relative name, so the hook's cwd has to be the worktree.
+func TestConventionalHookRunsWithoutAFlag(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := makeFixtureRepo(repo); err != nil {
+		t.Fatalf("build repo: %v", err)
+	}
+	script := filepath.Join(repo, "bootstrap.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch bootstrapped\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(repo, ".marquee"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(script, filepath.Join(repo, ".marquee", "hook")); err != nil {
+		t.Fatal(err)
+	}
+
+	proc, err := startMarqueeWith(repo, nil,
+		[]string{"sh", "-c", "test -f bootstrapped && exec " + upstreamBin},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proc.stop() })
+
+	if err := proc.waitHealthy(15 * time.Second); err != nil {
+		t.Fatalf("the app never came up, so the conventional hook did not run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "bootstrapped")); err != nil {
+		t.Fatalf("hook did not run in the launch worktree %q: %v", repo, err)
+	}
+}
+
+// Abuse: a .marquee/hook that is a directory must not become a process. marquee
+// says so and starts the child anyway, because a shape it cannot run is not a
+// bootstrap that failed.
+func TestConventionalHookDirectoryIsRefused(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := makeFixtureRepo(repo); err != nil {
+		t.Fatalf("build repo: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".marquee", "hook"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	proc, err := startMarqueeWith(repo, nil, []string{upstreamBin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proc.stop() })
+
+	if err := proc.waitHealthy(15 * time.Second); err != nil {
+		t.Fatalf("marquee did not start over an unrunnable .marquee/hook: %v", err)
+	}
+	logged := proc.output.String()
+	if !strings.Contains(logged, "it is a directory") {
+		t.Errorf("marquee did not warn about the directory-shaped hook:\n%s", logged)
+	}
+	if strings.Contains(logged, "switch-hook: running") {
+		t.Errorf("marquee tried to run the directory as a hook:\n%s", logged)
+	}
+}

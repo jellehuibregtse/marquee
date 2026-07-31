@@ -75,7 +75,7 @@ Everything after `--` is your command, run verbatim.
 | `--open` | off | Open the browser once the app is up. Off by default: marquee is usually left running all day under a process manager, and a window it opens by itself is one nobody asked for. |
 | `--quiet` | off | Suppress marquee's own log lines. |
 | `--allow-host` | — | Add a hostname to the internal-endpoint allowlist (repeatable). |
-| `--switch-hook` | — | Command run in a worktree before the child starts there, e.g. `"bundle install"`, including the worktree marquee itself is launched in. Bootstraps a fresh worktree; see [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |
+| `--switch-hook` | `.marquee/hook` | Command run in a worktree before the child starts there, e.g. `"bundle install"`, including the worktree marquee itself is launched in. Bootstraps a fresh worktree; defaults to `.marquee/hook` when that is executable, and an empty value turns it off. See [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |
 | `--hook-timeout` | `5m` | How long `--switch-hook` may run before marquee kills its process group. Raise it for a slow bootstrap; see [Bootstrapping a worktree](#bootstrapping-a-worktree-switch-hook). |
 | `--worktree-glob` | — | Only offer worktrees whose absolute path matches this glob as switch targets (repeatable). See [Switching worktrees](#switching-worktrees). |
 | `--ready-cmd` | — | Extra readiness check the target must pass before a switch counts as a success, e.g. `"curl -sf localhost:3036"`. See [Switching worktrees](#switching-worktrees). |
@@ -104,6 +104,23 @@ That covers every start, including the very first one:
 Running it on startup is the point: the worktree you happen to launch in is a worktree like any other, and if it were the one marquee never bootstrapped, it would be the one silently running against whatever a half-configured environment points at.
 
 The hook runs through `sh -c` with its working directory set to the worktree, so pipelines and `&&` chains work. **Write it to be idempotent**: the revert leg re-runs it in a worktree that was already working, and every restart runs it again.
+
+#### `.marquee/hook`, so you don't pass the flag
+
+You don't need the flag at all. If `.marquee/hook` in the directory you launch marquee in is an executable file, that file *is* the hook:
+
+```sh
+ln -s "$PWD/bin/setup" .marquee/hook   # or write the script there directly
+marquee -- bin/dev
+```
+
+Symlinks are followed, so pointing it at a script the repo already keeps (including one in a gitignored directory) is the expected way to adopt it.
+
+It is resolved **once, in the launch checkout**, and marquee runs that absolute path in each worktree it bootstraps. Resolving it per worktree would be the wrong thing: the worktrees you switch between are usually throwaway checkouts that never had the file, and a hook that disappears halfway through a session is worse than one that was never there.
+
+- An explicit `--switch-hook` wins over the file.
+- `--switch-hook ''` ignores the file, which is how you turn the convention off without deleting anything.
+- Only an **executable regular file** counts. Anything else there (a directory, a dangling symlink, a script you forgot to `chmod +x`) is named in a warning at startup and not run. A bootstrap you believe happened but didn't is worse than a loud refusal, so marquee never stays quiet about a hook it declined to run.
 
 One script can serve all three legs, because marquee tells it what is going on through the environment:
 

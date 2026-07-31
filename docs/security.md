@@ -258,6 +258,24 @@ this surface: it runs before the listener serves a single request, with the `cwd
 taken from `os.Getwd`. See the "Worktree switch endpoint" section for where the
 hook sits in the guard/switch sequence.
 
+**The conventional `.marquee/hook` does not widen it either.** With no
+`--switch-hook`, marquee runs an executable `.marquee/hook` found in the directory
+it was launched in as the hook command. That keeps the value on the operator side
+of the boundary: the path is built from `os.Getwd` and two fixed literals, so no
+byte of it comes from the HTTP request or the slug, and the discovery happens once
+at startup, before the listener answers anything. The switch legs reuse the command
+resolved then, so a request can never cause a new file to be looked up, and a
+worktree a switch moves into cannot contribute a script of its own. Three
+properties bound what can be spawned: only an **executable regular file** is
+accepted (`os.Stat`, so a symlink to one counts, while a directory, a symlink to a
+directory, a dangling symlink, and a non-executable file are each refused with a
+warning and no spawn); the absolute path is **shell-quoted** into a single `sh -c`
+word, so a checkout path containing a quote or a shell metacharacter cannot become
+a second command; and an explicit `--switch-hook` (including an explicit empty
+value) overrides the file, so an operator can always take the decision back. The
+trust level is deliberate and unchanged: a script in the checkout you are running
+`marquee -- bin/dev` in is material you already execute by starting your dev stack.
+
 **`--ready-cmd` does not widen it either.** The optional readiness command (an
 extra gate the target must pass before a switch counts as a success, such as
 `curl -sf localhost:3036`) is operator input from a CLI flag on exactly the same
@@ -306,7 +324,13 @@ hardened against corrupt input: see Threat 7's pidfile note.
   under `--worktree-glob`: the excluded worktree is neither offered in the status
   payload nor switchable over HTTP, and the child's process set is unchanged
   afterwards, which is what proves `cmd/marquee` hands the filter to the
-  orchestrator and not only to the bar).
+  orchestrator and not only to the bar);
+  `TestDiscoverHookRefusesShapesItCannotRun` and `TestShellQuote` in
+  `cmd/marquee/convention_test.go` (a `.marquee/hook` that is a directory, a
+  symlink to a directory, a dangling symlink, or non-executable yields no command
+  at all, and the accepted path is quoted as one shell word) with
+  `TestConventionalHookDirectoryIsRefused` in `e2e/hook_test.go` (the real binary
+  over a directory-shaped hook: it warns, spawns nothing, and still starts).
 
 ## Threat 5 — Malicious / compromised upstream responses
 

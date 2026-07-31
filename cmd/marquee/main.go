@@ -180,8 +180,15 @@ func run() int {
 	// against whatever a half-configured environment points at. A failing hook
 	// refuses the boot outright, mirroring a switch that fails its hook before
 	// anything has moved: nothing is started, so there is nothing to recover.
+	hookCommand, hookNotice, hookWarning := resolveSwitchHook(opts.switchHook, opts.switchHookSet, workdir)
+	if hookNotice != "" {
+		log.Info("%s", hookNotice)
+	}
+	if hookWarning != "" {
+		log.Warn("%s", hookWarning)
+	}
 	switchHook := hook.New(hook.Config{
-		Command: opts.switchHook,
+		Command: hookCommand,
 		Timeout: opts.hookTimeout,
 		Logf:    func(format string, args ...any) { log.Info(format, args...) },
 		Errf:    func(format string, args ...any) { log.Error(format, args...) },

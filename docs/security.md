@@ -355,7 +355,7 @@ hardened against corrupt input: see Threat 7's pidfile note.
   at all, and the accepted path is quoted as one shell word) with
   `TestConventionalHookDirectoryIsRefused` in `e2e/hook_test.go` (the real binary
   over a directory-shaped hook: it warns, spawns nothing, and still starts);
-  `TestLoadConfigArgsRefusesToSetTheCommand` and
+  `TestLoadConfigFlagsRefusesToSetTheCommand` and
   `TestParseArgsWithConfigRefusesAConfigWordInTheCommand` in
   `cmd/marquee/config_test.go` (every shape by which `.marquee/config` could put a
   word into the command is refused, at the shape check and at the invariant behind

@@ -105,7 +105,13 @@ Precedence follows from that. The file's flags are parsed as if they came first 
 
 - **the command line wins** for a flag that holds one value: `--position bottom-left` on the command line beats `--position top-right` in the file;
 - **repeatable flags add up**: `--allow-host` and `--worktree-glob` given on the command line extend what the file listed rather than replacing it, because "also allow this host" is the only thing that flag has ever meant;
-- **an invalid flag in the file fails the run**, with the same message the same word would produce on the command line.
+- **an invalid flag in the file fails the run**, naming the file and the line it is on:
+
+  ```
+  marquee: /path/to/repo/.marquee/config:3: flag provided but not defined: -no-open
+  ```
+
+  which is the message you want when a flag you wrote once has since been renamed or removed, rather than a complaint about a command line that never mentioned it.
 
 Two things the file deliberately cannot do:
 

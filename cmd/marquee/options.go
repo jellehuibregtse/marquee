@@ -83,6 +83,7 @@ type options struct {
 	position       string
 	size           string
 	theme          string
+	pillsRaw       string
 	pills          []string
 	open           bool
 	quiet          bool
@@ -112,7 +113,12 @@ func (s *stringList) Set(value string) error {
 	return nil
 }
 
-func parseArgs(name string, args []string, out io.Writer) (*options, error) {
+// newRunFlagSet registers the wrapper-mode flags. It is its own function because
+// the set is built twice per run: once over .marquee/config's words alone, so a
+// flag the set does not have can be reported against the line it was written on,
+// and once for real over those words followed by the command line. Both go through
+// here, so the check can never disagree with the flags that actually exist.
+func newRunFlagSet(name string, out io.Writer) (*flag.FlagSet, *options) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(out)
 	opts := &options{}
@@ -121,8 +127,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.StringVar(&opts.position, "position", knob.Default.Positions.Default, positionUsage)
 	fs.StringVar(&opts.size, "size", knob.Default.Sizes.Default, sizeUsage)
 	fs.StringVar(&opts.theme, "theme", knob.Default.Themes.Default, themeUsage)
-	var pillsRaw string
-	fs.StringVar(&pillsRaw, "pills", knob.Default.Pills.Default, pillsUsage)
+	fs.StringVar(&opts.pillsRaw, "pills", knob.Default.Pills.Default, pillsUsage)
 	fs.BoolVar(&opts.open, "open", false, openUsage)
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress marquee's informational output (warnings and errors still print)")
 	fs.Var((*stringList)(&opts.allowHosts), "allow-host", "extra Host accepted on /__marquee/* endpoints; exact or *.suffix wildcard, e.g. *.lvh.me (repeatable)")
@@ -135,11 +140,20 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.DurationVar(&opts.healthTimeout, "health-timeout", switcher.DefaultHealthTimeout, "how long to wait for a restarted child to become healthy before the switch reverts, e.g. 90s")
 	fs.DurationVar(&opts.restartTimeout, "restart-timeout", switcher.DefaultRestartTimeout, "how long a single stop-and-spawn of the child may take, e.g. 60s")
 	fs.BoolVar(&opts.showVersion, "version", false, "print version and exit")
+	// The usage text follows fs.Output() rather than the writer captured here, so a
+	// caller that silences the set while parsing (checkConfigFlags) can still print
+	// the usage dump afterwards by handing the set a real writer.
 	fs.Usage = func() {
-		_, _ = fmt.Fprintln(out, "usage: marquee [flags] -- command [args...]")
-		_, _ = fmt.Fprintln(out, "       marquee attach --upstream <url> [flags]   (proxy a server you run yourself)")
+		w := fs.Output()
+		_, _ = fmt.Fprintln(w, "usage: marquee [flags] -- command [args...]")
+		_, _ = fmt.Fprintln(w, "       marquee attach --upstream <url> [flags]   (proxy a server you run yourself)")
 		fs.PrintDefaults()
 	}
+	return fs, opts
+}
+
+func parseArgs(name string, args []string, out io.Writer) (*options, error) {
+	fs, opts := newRunFlagSet(name, out)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -165,7 +179,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 		_, _ = fmt.Fprintf(out, "marquee: invalid --theme %q: must be one of %s\n", opts.theme, knob.Default.Themes.List())
 		return nil, errUsage
 	}
-	pills, err := parsePills(pillsRaw)
+	pills, err := parsePills(opts.pillsRaw)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "marquee: %v\n", err)
 		return nil, errUsage

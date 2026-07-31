@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -30,34 +31,59 @@ func configPath(launchDir string) string {
 // known.
 var configName = filepath.Join(conventionDir, configFile)
 
-// loadConfigArgs reads .marquee/config in launchDir into flag words. No file means
+// configFlags is what .marquee/config contributes to a run: the flag words the
+// file holds, still grouped by the line each was written on, plus the path they
+// came from. Keeping the grouping is what lets a flag error name its source rather
+// than blame a command line that never mentioned the flag.
+type configFlags struct {
+	path  string
+	lines []configFlagLine
+}
+
+type configFlagLine struct {
+	number int
+	words  []string
+}
+
+func (c configFlags) empty() bool { return len(c.lines) == 0 }
+
+// args flattens the file's words back into one argv, in the order written.
+func (c configFlags) args() []string {
+	var args []string
+	for _, line := range c.lines {
+		args = append(args, line.words...)
+	}
+	return args
+}
+
+// loadConfigFlags reads .marquee/config in launchDir into flag words. No file means
 // no words, which is the zero-config case. A file that exists but cannot be read
 // or cannot be parsed is an error: it was written to change how marquee runs, and
 // applying none of it while starting anyway is the one outcome nobody wants.
-func loadConfigArgs(launchDir string) ([]string, error) {
+func loadConfigFlags(launchDir string) (configFlags, error) {
 	path := configPath(launchDir)
+	cfg := configFlags{path: path}
 	data, err := os.ReadFile(path) // #nosec G304 -- a fixed name under the launch directory, never request input.
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
+			return cfg, nil
 		}
-		return nil, fmt.Errorf("could not read %s: %w", path, err)
+		return cfg, fmt.Errorf("could not read %s: %w", path, err)
 	}
-	var args []string
 	for i, line := range strings.Split(string(data), "\n") {
 		words, err := splitConfigLine(line)
 		if err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, i+1, err)
+			return configFlags{}, fmt.Errorf("%s:%d: %w", path, i+1, err)
 		}
 		if len(words) == 0 {
 			continue
 		}
 		if err := checkConfigLine(words); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, i+1, err)
+			return configFlags{}, fmt.Errorf("%s:%d: %w", path, i+1, err)
 		}
-		args = append(args, words...)
+		cfg.lines = append(cfg.lines, configFlagLine{number: i + 1, words: words})
 	}
-	return args, nil
+	return cfg, nil
 }
 
 // checkConfigLine holds the file to one flag per line. The shape is worth
@@ -150,12 +176,48 @@ func splitConfigLine(line string) ([]string, error) {
 	return words, nil
 }
 
+// checkConfigFlags gives the file's own words a parse of their own, line by line,
+// so a flag the set does not have or a value it cannot parse is reported against
+// the line it was written on. Once this passes, any complaint left for the real
+// parse belongs to the command line and keeps the wording it has always had.
+//
+// Line by line rather than all at once because checkConfigLine already holds the
+// file to one flag per line, so a failing Parse call identifies the line without
+// any inspection of how far the flag package got through an argv. The set is
+// discarded afterwards, so setting values on it here cannot reach the real parse.
+func checkConfigFlags(name string, cfg configFlags, out io.Writer) error {
+	// Named set rather than fs, which in this file is the io/fs package.
+	set, _ := newRunFlagSet(name, io.Discard)
+	for _, line := range cfg.lines {
+		err := set.Parse(line.words)
+		if err == nil {
+			continue
+		}
+		// -h in the file is not an error to attribute; the real parse turns it into
+		// the usual help output and exit 0.
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		// The complaint is the flag package's own, so the file's flags are held to
+		// exactly the flags that exist; all this adds is where the word came from.
+		_, _ = fmt.Fprintf(out, "marquee: %s:%d: %v\n", cfg.path, line.number, err)
+		set.SetOutput(out)
+		set.Usage()
+		return errUsage
+	}
+	return nil
+}
+
 // parseArgsWithConfig parses the config file's flags and the real command line as
 // one argv, the file first. That ordering is the whole precedence rule: flag's
 // last-occurrence-wins makes the command line override a scalar flag set in the
 // file, while a repeatable flag (--allow-host, --worktree-glob) collects both, so
 // a command-line host adds to the file's allowlist instead of replacing it.
-func parseArgsWithConfig(name string, configArgs, args []string, out io.Writer) (*options, error) {
+func parseArgsWithConfig(name string, cfg configFlags, args []string, out io.Writer) (*options, error) {
+	if err := checkConfigFlags(name, cfg, out); err != nil {
+		return nil, err
+	}
+	configArgs := cfg.args()
 	combined := make([]string, 0, len(configArgs)+len(args))
 	combined = append(combined, configArgs...)
 	combined = append(combined, args...)

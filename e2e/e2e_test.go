@@ -267,7 +267,11 @@ func startMarqueeAt(repo string, upstreamArgs ...string) (*marqueeProc, error) {
 // startMarqueeWith is the general launcher: extra marquee flags and the child
 // argv of the caller's choosing, so a test can exercise a flag (--switch-hook)
 // and make the child itself depend on what that flag did.
-func startMarqueeWith(repo string, flags []string, childArgv []string) (*marqueeProc, error) {
+//
+// env is appended to the inherited environment. The CLI tests use it to move
+// the user cache directory into a temp dir, so a test's session file can never
+// be found by — or collide with — the marquee the developer is running.
+func startMarqueeWith(repo string, flags []string, childArgv []string, env ...string) (*marqueeProc, error) {
 	listenPort, err := freePort()
 	if err != nil {
 		return nil, err
@@ -286,6 +290,9 @@ func startMarqueeWith(repo string, flags []string, childArgv []string) (*marquee
 	args = append(args, childArgv...)
 	cmd := exec.Command(marqueeBin, args...)
 	cmd.Dir = repo
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	out := &syncBuffer{}
 	cmd.Stdout = io.MultiWriter(os.Stderr, out)
 	cmd.Stderr = cmd.Stdout

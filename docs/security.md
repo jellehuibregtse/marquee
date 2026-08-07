@@ -166,6 +166,35 @@ bar snippet is spliced into HTML — it never touches process state or proxying 
 so `Sec-Fetch-Site` alone is the proportionate guard. `MARQUEE_DISABLE_BAR=1`
 at launch is a hard off the toggle cannot override.
 
+**CLI session file.** `marquee status` and `marquee switch` run in a separate
+process, so wrapper mode records the token in a session file beside the pidfile
+(`<user cache>/marquee/<sha256(listen)[:8]>.json`, mode `0600` inside the
+existing `0700` directory, written once the listener answers and removed by a
+`defer` on every path out of `run`). This grants a same-user attacker nothing
+new: the token already reaches every injected page through the
+`<marquee-bar token="…">` attribute, so any process running as you can read it
+with a single request to the proxy, and such a process can already signal the
+child directly. The CLI is an ordinary client: it sends the same `Origin` and
+`X-Marquee-Token` headers to the same endpoint, so the guard stack below is
+unchanged, with no second listener and no guard conditional on where a request
+arrived. A session file left behind by a `SIGKILL`ed marquee holds a token that
+authenticates nothing, because the token is minted per process; the CLI
+therefore treats the file as a hint, confirming that the recorded pid is alive
+and that `GET /__marquee/status` answers on the recorded address before sending
+the token, and deleting the file when the pid is gone, the way `warnStaleChild`
+treats a stale pidfile. Attach mode mints no token and writes no session file.
+
+- Code: `session`, `writeSession`, `readSession`, `liveSessions`,
+  `processAlive` in `cmd/marquee/session.go`; `resolveTarget`, `postSwitch` in
+  `cmd/marquee/control.go`.
+- Proven by: `TestWriteSessionIsUnreadableByOthers` (0600 file in a 0700
+  directory), `TestLiveSessionsDropsAndDeletesDeadOnes` (a **stale session** is
+  never dialled and is cleaned up),
+  `TestReadSessionRejectsAnEmptyListenOrPid`,
+  `TestProcessAliveRefusesPidOneAndBelow` (pid `<= 1` is never alive, mirroring
+  the pidfile guard) in `cmd/marquee/session_test.go`;
+  `TestSessionFileRemovedOnShutdown` in `e2e/cli_test.go`.
+
 The token defends a **browser-driven** cross-site request on the loopback
 default; it is not a secret against an active network reader. Under
 `--unsafe-listen`, proxied app traffic is no longer Host-guarded, so a LAN peer
@@ -482,8 +511,15 @@ recorded pgid is `<= 1` (so it can never suggest the catastrophic `kill -TERM
 group itself**. `groupAlive` uses signal 0 (an existence probe, not a real
 signal).
 
+The CLI session file is the other previous-run artifact and is treated the same
+way: `liveSessions` deletes a file that does not parse, that has no listen
+address or pid, or whose pid is `<= 1` or no longer running, and `processAlive`
+probes with signal 0 as well. Nothing on that path signals anything. The token
+it holds is written and read back, never printed to a response or a log line.
+
 - Code: `statusHandler`, `Register` in `internal/status/status.go`;
-  `warnStaleChild`, `groupAlive` in `cmd/marquee/pidfile.go`.
+  `warnStaleChild`, `groupAlive` in `cmd/marquee/pidfile.go`; `liveSessions`,
+  `processAlive` in `cmd/marquee/session.go`.
 - Proven by: `TestStatusJSONShape`, `TestStatusReportsPosition`,
   `TestStatusEmptySnapshotSerializesEmptyWorktreeList`,
   `TestStatusMethodNotAllowed`, `TestHostGuardEnforcedThroughMux` in

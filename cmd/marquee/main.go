@@ -100,9 +100,19 @@ func switchTargetLines(all, targets []gitinfo.Worktree) (info, warn string) {
 		"that * never crosses a /, and that matching is case-sensitive"
 }
 
+// main routes the subcommands before wrapper mode, which is the bare form and
+// therefore the default. A subcommand name can never collide with the wrapped
+// command: that one only ever arrives after the `--` separator.
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "attach" {
-		os.Exit(runAttach(os.Args[2:]))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "attach":
+			os.Exit(runAttach(os.Args[2:]))
+		case "status":
+			os.Exit(runStatus(os.Args[2:]))
+		case "switch":
+			os.Exit(runSwitch(os.Args[2:]))
+		}
 	}
 	os.Exit(run())
 }
@@ -294,6 +304,21 @@ func run() int {
 
 	log.Info("listening on http://%s, upstream 127.0.0.1:%d, child: %s",
 		ln.Addr(), internalPort, strings.Join(opts.command, " "))
+
+	// The session file is written as soon as the listener answers, before the
+	// startup hook runs, so `marquee status` reports a marquee that is still
+	// bootstrapping instead of claiming none is running — which on a real project
+	// is the first several minutes of every boot. It records the address the
+	// listener actually got, not the one asked for, because --listen may name
+	// port 0 and a client has to dial a real port. A session file is a
+	// convenience, so a failure to write one is a warning and nothing more.
+	if sessionFile, err := sessionPath(ln.Addr().String()); err != nil {
+		log.Warn("could not locate a session file; the status and switch subcommands will not find this marquee: %v", err)
+	} else if err := writeSession(sessionFile, session{Listen: ln.Addr().String(), Token: switchToken, PID: os.Getpid()}); err != nil {
+		log.Warn("could not write the session file %s; the status and switch subcommands will not find this marquee: %v", sessionFile, err)
+	} else {
+		defer removeSession(sessionFile)
+	}
 
 	// Signals are wired before the bootstrap runs, so Ctrl-C during a long hook
 	// kills the hook's process group (through its context) instead of leaving a

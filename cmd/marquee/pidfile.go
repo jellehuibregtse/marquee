@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,12 +15,11 @@ import (
 // a given listen address, so the next start on the same address can
 // detect a child that survived a killed marquee.
 func pidfilePath(listen string) (string, error) {
-	cache, err := os.UserCacheDir()
+	dir, err := marqueeCacheDir()
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256([]byte(listen))
-	return filepath.Join(cache, "marquee", hex.EncodeToString(sum[:8])+".pid"), nil
+	return filepath.Join(dir, listenKey(listen)+".pid"), nil
 }
 
 func writePidfile(path string, pgid int) error {

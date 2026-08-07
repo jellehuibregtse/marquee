@@ -213,6 +213,30 @@ With no glob, every worktree git knows about is a target. Repeat the flag to kee
 
 One consequence worth knowing: the bar only shows its switcher when more than one worktree survives filtering, so globs that match nothing leave you with no switcher at all. Switching back to main stays possible over the API either way.
 
+### From the terminal
+
+Everything the bar shows and the picker does is also two subcommands, so a switch doesn't need a browser:
+
+```sh
+marquee status
+marquee switch feature
+```
+
+Neither takes an address. marquee records where it listens in a file under your user cache directory when it starts, and removes it when it exits, so `status` and `switch` find the marquee serving the repository you are standing in. Run several marquees for several projects and each command still picks the right one, because it matches your working directory against the worktrees that marquee knows about. If two of them could both be meant, the command says so and asks for `--listen` rather than guessing, since a switch restarts your dev server.
+
+`status` prints the branch, the current worktree, the pull request, the child's state, and the worktrees you can switch into, with the current one marked. `switch` takes a worktree slug, which is the directory name git reports and the same name `status` lists. A typo gets you the real list back:
+
+```
+$ marquee switch featrue
+marquee: unknown worktree "featrue"; switch targets are: main, feature, hotfix
+```
+
+A switch runs your `--switch-hook` in the target worktree, so the command blocks for as long as that takes. There is no client-side timeout; the server's `--hook-timeout` and `--health-timeout` are still the only limits. The dirty-worktree rule is the picker's rule too, so switching out of a worktree with uncommitted changes needs `--force`, and switching back to main never does.
+
+Both take `--json`, which is what makes them scriptable. `marquee status --json` is the status endpoint's own payload passed through unchanged, so a field the human summary doesn't render is still there for `jq`. `marquee switch --json` prints the switch response, whose `error` field is `dirty`, `busy`, `unknown_slug`, or `switch_failed`. Exit status is 0 for success, 2 for a usage mistake, 1 for everything else.
+
+There is nothing extra to grant: both are clients of the same HTTP endpoints the bar uses and pass the same guards.
+
 ### Attach mode
 
 For a server marquee shouldn't manage — one you start yourself in another terminal — use attach mode. It's a pure proxy with no child process:
@@ -223,6 +247,8 @@ marquee attach --listen 127.0.0.1:3000 --upstream http://localhost:3100
 ```
 
 Both `--listen` and `--upstream` must be loopback; a non-loopback value is refused unless you pass `--unsafe-listen` (which prints a persistent network-exposure warning). `--upstream` is required and must be an `http`/`https` URL.
+
+Attach mode has no child process to restart, so there is nothing to switch and it records no session file. `marquee status --listen 127.0.0.1:3000` still reports what the bar shows; `marquee switch` says why it can't.
 
 ## The PORT recipe (process managers)
 
